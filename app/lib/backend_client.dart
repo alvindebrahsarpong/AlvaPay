@@ -410,6 +410,7 @@ class AlvaPayApi implements AlvaPayBackend {
     required bool authenticated,
     Map<String, Object?>? body,
     Map<String, String> headers = const {},
+    bool retryUnauthorized = true,
   }) async {
     final requestHeaders = <String, String>{'Accept': 'application/json'};
     if (body != null) requestHeaders['Content-Type'] = 'application/json';
@@ -426,6 +427,21 @@ class AlvaPayApi implements AlvaPayBackend {
         .send(request)
         .timeout(const Duration(seconds: 20));
     final response = await http.Response.fromStream(streamed);
+    if (response.statusCode == 401 &&
+        authenticated &&
+        retryUnauthorized &&
+        await _tokenStore.readAccountEmail() == null) {
+      await _tokenStore.clear();
+      _sessionToken = null;
+      return _send(
+        method,
+        path,
+        authenticated: authenticated,
+        body: body,
+        headers: headers,
+        retryUnauthorized: false,
+      );
+    }
     final decoded = response.body.isEmpty ? null : jsonDecode(response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final detail = decoded is Map<String, dynamic> ? decoded['detail'] : null;

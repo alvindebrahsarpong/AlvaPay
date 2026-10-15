@@ -128,6 +128,55 @@ void main() {
     },
   );
 
+  test(
+    'replaces an expired guest session and retries the request once',
+    () async {
+      final tokenStore = _MemoryTokenStore(token: 'expired-guest-session');
+      final requests = <http.Request>[];
+      var invoiceRequestCount = 0;
+      final api = AlvaPayApi(
+        tokenStore: tokenStore,
+        client: MockClient((request) async {
+          requests.add(request);
+          if (request.url.path == '/api/invoices') {
+            invoiceRequestCount++;
+            if (invoiceRequestCount == 1) {
+              return http.Response(
+                '{"detail":"This AlvaPay session is no longer valid."}',
+                401,
+              );
+            }
+          }
+          if (request.url.path == '/api/invoices' &&
+              request.headers['Authorization'] ==
+                  '****** expired-guest-session') {
+            return http.Response(
+              '{"detail":"This AlvaPay session is no longer valid."}',
+              401,
+            );
+          }
+          if (request.url.path == '/api/session') {
+            return http.Response('{"token":"replacement-guest-session"}', 201);
+          }
+          return http.Response('[]', 200);
+        }),
+        baseUri: Uri.parse('https://api.example.test'),
+      );
+
+      try {
+        expect(await api.listInvoices(), isEmpty);
+        expect(tokenStore.token, 'replacement-guest-session');
+        expect(requests.map((request) => request.url.path), [
+          '/api/invoices',
+          '/api/session',
+          '/api/invoices',
+        ]);
+      } finally {
+        api.close();
+      }
+    },
+  );
+
   test('requests cash-flow summary over the authenticated API', () async {
     late http.Request sentRequest;
     final api = AlvaPayApi(
