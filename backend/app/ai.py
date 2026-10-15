@@ -6,7 +6,12 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from app.schemas import SUPPORTED_CURRENCIES, InvoiceDraft
+from app.schemas import (
+    SUPPORTED_CURRENCIES,
+    CashFlowCurrencyTotal,
+    CashFlowSummaryText,
+    InvoiceDraft,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,20 @@ _SYSTEM_PROMPT = (
     "Write the service description as a concise phrase. Do not initiate or authorize payments."
 )
 
+_CASH_FLOW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"summary": {"type": "string"}},
+    "required": ["summary"],
+    "additionalProperties": False,
+}
+
+_CASH_FLOW_SYSTEM_PROMPT = (
+    "Write one concise, factual cash-flow sentence using only the verified payment "
+    "aggregates provided by the application. The figures are all-time totals grouped "
+    "by currency. Do not infer unpaid invoices, expenses, profit, trends, dates, or "
+    "future income. Do not introduce or calculate any numbers."
+)
+
 
 class AIConfigurationError(Exception):
     pass
@@ -70,13 +89,7 @@ class InvoiceDraftService:
         self.transport = transport
 
     async def create_draft(self, text: str) -> InvoiceDraft:
-        if self.provider != "anthropic":
-            raise AIConfigurationError("The configured AI provider is not supported.")
-        if not self.api_key:
-            raise AIConfigurationError(
-                "AI drafting is not configured. Add an Anthropic API key "
-                "to the backend environment."
-            )
+        self._validate_configuration("drafting")
 
         feedback: str | None = None
         for attempt in range(2):
@@ -87,7 +100,11 @@ class InvoiceDraftService:
                     "Return a corrected response matching the required schema."
                 )
 
-            data = await self._request(user_message)
+            data = await self._request(
+                user_message,
+                system_prompt=_SYSTEM_PROMPT,
+                schema=_DRAFT_SCHEMA,
+            )
             try:
                 return InvoiceDraft.model_validate(data)
             except ValidationError as error:
@@ -101,7 +118,55 @@ class InvoiceDraftService:
 
         raise AIProviderError("Alva could not prepare an invoice draft. Please try again.")
 
-    async def _request(self, user_message: str) -> dict[str, Any]:
+    async def create_cash_flow_summary(
+        self,
+        totals: list[CashFlowCurrencyTotal],
+    ) -> CashFlowSummaryText:
+        self._validate_configuration("cash-flow summary")
+        user_message = json.dumps(
+            {"verified_payments_by_currency": [total.model_dump() for total in totals]}
+        )
+        feedback: str | None = None
+        for attempt in range(2):
+            corrected_message = user_message
+            if feedback is not None:
+                corrected_message = (
+                    f"{user_message}\n\nYour previous response was rejected by validation: "
+                    f"{feedback}. Return a corrected response matching the required schema."
+                )
+            data = await self._request(
+                corrected_message,
+                system_prompt=_CASH_FLOW_SYSTEM_PROMPT,
+                schema=_CASH_FLOW_SCHEMA,
+            )
+            try:
+                return CashFlowSummaryText.model_validate(data)
+            except ValidationError as error:
+                feedback = str(error)
+                if attempt == 1:
+                    logger.warning("AI cash-flow summary failed schema validation after retry")
+                    raise AIProviderError(
+                        "Alva could not verify a cash-flow summary. Please try again."
+                    ) from error
+
+        raise AIProviderError("Alva could not prepare a cash-flow summary. Please try again.")
+
+    def _validate_configuration(self, feature: str) -> None:
+        if self.provider != "anthropic":
+            raise AIConfigurationError("The configured AI provider is not supported.")
+        if not self.api_key:
+            raise AIConfigurationError(
+                f"AI {feature} is not configured. Add an Anthropic API key "
+                "to the backend environment."
+            )
+
+    async def _request(
+        self,
+        user_message: str,
+        *,
+        system_prompt: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
         headers = {
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
@@ -110,12 +175,12 @@ class InvoiceDraftService:
         body = {
             "model": self.model,
             "max_tokens": 1024,
-            "system": _SYSTEM_PROMPT,
+            "system": system_prompt,
             "messages": [{"role": "user", "content": user_message}],
             "output_config": {
                 "format": {
                     "type": "json_schema",
-                    "schema": _DRAFT_SCHEMA,
+                    "schema": schema,
                 },
             },
         }

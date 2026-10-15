@@ -9,15 +9,69 @@ class _MemoryTokenStore implements SessionTokenStore {
   _MemoryTokenStore({this.token});
 
   String? token;
+  String? email;
 
   @override
   Future<String?> read() async => token;
 
   @override
   Future<void> write(String value) async => token = value;
+
+  @override
+  Future<String?> readAccountEmail() async => email;
+
+  @override
+  Future<void> writeAccountEmail(String value) async => email = value;
+
+  @override
+  Future<void> clear() async {
+    token = null;
+    email = null;
+  }
 }
 
 void main() {
+  test('registers, restores, and revokes an account session', () async {
+    final tokenStore = _MemoryTokenStore();
+    final requests = <http.Request>[];
+    final api = AlvaPayApi(
+      tokenStore: tokenStore,
+      client: MockClient((request) async {
+        requests.add(request);
+        if (request.url.path == '/api/auth/register') {
+          expect(jsonDecode(request.body), {
+            'email': 'user@example.test',
+            'password': 'synthetic-test-passphrase',
+          });
+          return http.Response(
+            '{"token":"account-session","email":"user@example.test"}',
+            201,
+          );
+        }
+        expect(request.url.path, '/api/auth/logout');
+        expect(request.headers['Authorization'], startsWith('Bearer '));
+        return http.Response('{"status":"signed_out"}', 200);
+      }),
+      baseUri: Uri.parse('https://api.example.test'),
+    );
+
+    try {
+      expect(await api.restoreAccount(), isNull);
+      await api.register('user@example.test', 'synthetic-test-passphrase');
+      expect(await api.restoreAccount(), 'user@example.test');
+      expect(tokenStore.token, isNotNull);
+      await api.logout();
+      expect(tokenStore.token, isNull);
+      expect(tokenStore.email, isNull);
+      expect(requests.map((request) => request.url.path), [
+        '/api/auth/register',
+        '/api/auth/logout',
+      ]);
+    } finally {
+      api.close();
+    }
+  });
+
   test('creates and reuses a session token before reading invoices', () async {
     final tokenStore = _MemoryTokenStore();
     final requests = <http.Request>[];
@@ -39,6 +93,44 @@ void main() {
       expect(requests.first.method, 'POST');
       expect(requests.first.url.path, '/api/session');
       expect(requests.last.headers['Authorization'], 'Bearer private-session');
+    } finally {
+      api.close();
+    }
+  });
+
+  test('requests cash-flow summary over the authenticated API', () async {
+    late http.Request sentRequest;
+    final api = AlvaPayApi(
+      tokenStore: _MemoryTokenStore(token: 'existing-session'),
+      client: MockClient((request) async {
+        sentRequest = request;
+        return http.Response(
+          jsonEncode({
+            'verified_invoice_count': 2,
+            'totals_by_currency': [
+              {
+                'currency': 'USD',
+                'paid_invoice_count': 2,
+                'received_cents': 16900,
+              },
+            ],
+            'summary': 'Two verified USD payments are on record.',
+          }),
+          200,
+        );
+      }),
+      baseUri: Uri.parse('https://api.example.test'),
+    );
+
+    try {
+      final summary = await api.cashFlowSummary();
+      expect(sentRequest.method, 'POST');
+      expect(sentRequest.url.path, '/api/ai/cash-flow-summary');
+      expect(sentRequest.headers['Authorization'], startsWith('Bearer '));
+      expect(sentRequest.body, isEmpty);
+      expect(summary.verifiedInvoiceCount, 2);
+      expect(summary.totalsByCurrency.single.received, 'USD 169.00');
+      expect(summary.summary, 'Two verified USD payments are on record.');
     } finally {
       api.close();
     }

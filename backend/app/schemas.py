@@ -72,6 +72,34 @@ class CheckoutConfirmation(BaseModel):
     currency: str = Field(pattern=r"^(USD|EUR|GBP|CAD)$")
 
 
+class AccountCredentials(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_account_email(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def validate_account_email(cls, value: str) -> str:
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("Enter a valid email address.")
+        return value
+
+
+class AuthSessionOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+    email: str
+
+
 class InvoiceOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -87,3 +115,25 @@ class InvoiceOut(BaseModel):
     approval_url: str | None
     paypal_capture_id: str | None
     created_at: str
+
+
+class CashFlowCurrencyTotal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    currency: str = Field(pattern=r"^(USD|EUR|GBP|CAD)$")
+    paid_invoice_count: int = Field(strict=True, gt=0)
+    received_cents: int = Field(strict=True, gt=0)
+
+
+class CashFlowSummaryText(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    summary: str = Field(min_length=10, max_length=400)
+
+
+class CashFlowSummaryOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verified_invoice_count: int = Field(strict=True, ge=0)
+    totals_by_currency: list[CashFlowCurrencyTotal]
+    summary: str = Field(min_length=1, max_length=400)

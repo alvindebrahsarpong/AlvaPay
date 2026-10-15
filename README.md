@@ -13,8 +13,10 @@ draft, persistence, and PayPal Sandbox checkout workflow. Users can review an
 AI-assisted draft, save it to SQLite, explicitly confirm its exact amount, open
 PayPal Sandbox, then ask the backend to capture and verify the order. Tests use
 synthetic provider responses; no live AI request or PayPal Sandbox payment has
-been made. The app is not yet deployed, and cash-flow chat, payment webhooks,
-and receipt-photo extraction are not implemented.
+been made. The app is not yet deployed, and conversational cash-flow chat,
+payment webhooks, and receipt-photo extraction are not implemented.
+Email/password registration, login, and revocable logout are implemented for
+private MVP workspaces.
 
 ## Repository layout
 
@@ -107,29 +109,42 @@ images are not currently accepted.
 
 The current backend workflow is:
 
-1. `POST /api/session` creates a private anonymous session. Send its bearer
-   token to the authenticated routes; only a hash of the token is stored.
-2. `POST /api/ai/draft` analyzes an invoice description when an AI key is
+1. `POST /api/session` creates a private anonymous session. For a named
+   workspace, use `POST /api/auth/register` or `POST /api/auth/login` with an
+   email and password (minimum 12 characters). Passwords are stored as
+   PBKDF2-SHA256 hashes, session tokens are stored as hashes, and
+   `POST /api/auth/logout` revokes the current bearer token. Each account has
+   one active session; a new login replaces its previous session. Email
+   verification and password recovery are not included in this MVP.
+2. Send the returned bearer token to authenticated routes.
+   `POST /api/ai/draft` analyzes an invoice description when an AI key is
    configured.
-3. After review, `POST /api/invoices` saves the exact details. Include an
+3. `POST /api/ai/cash-flow-summary` summarizes all-time totals from this
+   session's invoices whose status is `PAID` and that have a verified PayPal
+   capture ID. Only currency-grouped counts and totals are sent to AI; customer
+   details, drafts, and unpaid invoices are excluded.
+4. After review, `POST /api/invoices` saves the exact details. Include an
    `Idempotency-Key` header so a retried save cannot create a duplicate.
-4. Only after the user confirms the displayed amount, call
+5. Only after the user confirms the displayed amount, call
    `POST /api/invoices/{id}/checkout` with
    `{"confirmed":true,"amount_cents":8450,"currency":"USD"}` (using the
    reviewed invoice values); the API rejects missing or mismatched
    confirmations. Open the returned `approval_url` for PayPal Sandbox approval.
-5. After approval, call `POST /api/invoices/{id}/capture`. The backend fetches
+6. After approval, call `POST /api/invoices/{id}/capture`. The backend fetches
    and validates the PayPal order and capture amount/currency before it marks
    the invoice paid. Client-provided success statuses are ignored.
-6. Use `GET /api/invoices` or `GET /api/invoices/{id}` to read persisted status.
+7. Use `GET /api/invoices` or `GET /api/invoices/{id}` to read persisted status.
 
 PayPal order creation, capture, and invoice saves have stable idempotency
 protection. The app returns to AlvaPay after Sandbox approval; the user must
 explicitly choose **Verify payment** to ask the backend to capture and verify
 the approved order. The backend currently uses polling during refresh; PayPal
-webhooks, reminders, and AI cash-flow summaries/chat remain future work. The
-Flutter app is wired to the draft, invoice, checkout, capture, and refresh
-routes, and stores the anonymous session token in platform secure storage.
+webhooks, reminders, and conversational cash-flow chat remain future work.
+The summary endpoint filters verified payment totals on the server before
+sending currency-grouped aggregates (without invoice/customer details) to AI.
+The Flutter app is wired to the draft, summary, invoice, checkout, capture,
+and refresh routes, and stores the anonymous session token in platform secure
+storage.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system diagram.
 
 Without provider credentials, the backend deliberately returns a clear
@@ -210,7 +225,9 @@ automated synthetic tests; do not claim a successful provider payment.
 
 ## Security
 
-Keep all PayPal and AI credentials in backend environment variables. Never
+Keep all PayPal and AI credentials in backend environment variables. Passwords
+and session tokens are stored as hashes by the backend; session tokens are
+stored in platform secure storage by the app and revoked by logout. Never
 commit `.env` files, database files, access tokens, or real customer data.
 PayPal integrations are sandbox-only for this project.
 

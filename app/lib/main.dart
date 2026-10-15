@@ -17,6 +17,25 @@ const _line = Color(0xFFE6E9E3);
 const _forest = Color(0xFF173B35);
 const _mint = Color(0xFFD7E8D8);
 const _gold = Color(0xFFE6C990);
+const _darkCanvas = Color(0xFF0B1220);
+const _darkSurface = Color(0xFF17211F);
+const _darkElevated = Color(0xFF202C29);
+const _darkText = Color(0xFFF7F3EA);
+const _darkMuted = Color(0xFFBFC9D6);
+const _darkLine = Color(0xFF39475A);
+const _darkGold = Color(0xFFD8C17D);
+const _darkGoldContainer = Color(0xFF3B3320);
+
+extension _AlvaPayTheme on BuildContext {
+  Color get appText => Theme.of(this).colorScheme.onSurface;
+  Color get appMutedText => Theme.of(this).colorScheme.onSurfaceVariant;
+  Color get appBorder => Theme.of(this).colorScheme.outline;
+  Color get appAccent => Theme.of(this).colorScheme.primary;
+  Color get appOnAccent => Theme.of(this).colorScheme.onPrimary;
+  Color get appAccentContainer => Theme.of(this).colorScheme.primaryContainer;
+  Color get appOnAccentContainer =>
+      Theme.of(this).colorScheme.onPrimaryContainer;
+}
 
 class AlvaPayApp extends StatefulWidget {
   const AlvaPayApp({super.key, this.backend, this.openApprovalUrl});
@@ -35,6 +54,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
   late final bool _ownsBackend;
   ThemeMode _themeMode = ThemeMode.light;
   int _selectedIndex = 0;
+  String? _accountEmail;
   List<Invoice> _invoices = [];
   final Set<String> _busyInvoices = {};
   bool _loading = true;
@@ -45,6 +65,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
     super.initState();
     _ownsBackend = widget.backend == null;
     _backend = widget.backend ?? AlvaPayApi();
+    unawaited(_restoreAccount());
     unawaited(_reloadInvoices());
   }
 
@@ -77,15 +98,13 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
     }
   }
 
-  String _friendlyError(Object error) {
-    if (error is AlvaPayApiException) return error.message;
-    if (error is TimeoutException) {
-      return 'The request took too long. Check your connection and try again.';
+  Future<void> _restoreAccount() async {
+    try {
+      final email = await _backend.restoreAccount();
+      if (mounted) setState(() => _accountEmail = email);
+    } catch (error) {
+      if (mounted) _showMessage(_friendlyError(error));
     }
-    if (error is FormatException) {
-      return 'AlvaPay received an invalid response. Refresh and try again.';
-    }
-    return 'AlvaPay could not reach the backend. Check its URL and try again.';
   }
 
   void _showMessage(String message) {
@@ -126,6 +145,52 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
           ? ThemeMode.dark
           : ThemeMode.light;
     });
+  }
+
+  void _showAccountDialog() {
+    final dialogContext = _navigatorKey.currentContext;
+    if (dialogContext == null) return;
+    showDialog<void>(
+      context: dialogContext,
+      builder: (context) => AccountDialog(
+        accountEmail: _accountEmail,
+        onLogin: _loginAccount,
+        onRegister: _registerAccount,
+        onLogout: _logoutAccount,
+      ),
+    );
+  }
+
+  Future<void> _loginAccount(String email, String password) async {
+    await _backend.login(email, password);
+    final accountEmail = await _backend.restoreAccount();
+    if (!mounted) return;
+    setState(() {
+      _accountEmail = accountEmail;
+      _invoices = [];
+    });
+    await _reloadInvoices();
+  }
+
+  Future<void> _registerAccount(String email, String password) async {
+    await _backend.register(email, password);
+    final accountEmail = await _backend.restoreAccount();
+    if (!mounted) return;
+    setState(() {
+      _accountEmail = accountEmail;
+      _invoices = [];
+    });
+    await _reloadInvoices();
+  }
+
+  Future<void> _logoutAccount() async {
+    await _backend.logout();
+    if (!mounted) return;
+    setState(() {
+      _accountEmail = null;
+      _invoices = [];
+    });
+    await _reloadInvoices();
   }
 
   Future<void> _openComposer() async {
@@ -235,7 +300,11 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.cloud_off_outlined, size: 38, color: _muted),
+            Icon(
+              Icons.cloud_off_outlined,
+              size: 38,
+              color: context.appMutedText,
+            ),
             const SizedBox(height: 14),
             const Text(
               'Your workspace is waiting',
@@ -245,7 +314,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
             Text(
               _loadError ?? 'Connect to the AlvaPay backend to load invoices.',
               textAlign: TextAlign.center,
-              style: const TextStyle(color: _muted),
+              style: TextStyle(color: context.appMutedText),
             ),
             const SizedBox(height: 18),
             OutlinedButton.icon(
@@ -262,50 +331,59 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
   @override
   Widget build(BuildContext context) {
     final isDark = _themeMode == ThemeMode.dark;
+    final colorScheme =
+        ColorScheme.fromSeed(
+          seedColor: _forest,
+          brightness: isDark ? Brightness.dark : Brightness.light,
+        ).copyWith(
+          surface: isDark ? _darkSurface : _paper,
+          onSurface: isDark ? _darkText : _ink,
+          onSurfaceVariant: isDark ? _darkMuted : _muted,
+          primary: isDark ? _darkGold : _forest,
+          onPrimary: isDark ? _darkCanvas : Colors.white,
+          primaryContainer: isDark ? _darkGoldContainer : _mint,
+          onPrimaryContainer: isDark ? const Color(0xFFFFE6A8) : _forest,
+          outline: isDark ? _darkLine : _line,
+          surfaceContainerLow: isDark ? const Color(0xFF121B29) : _canvas,
+          surfaceContainerHighest: isDark ? _darkElevated : _canvas,
+        );
     final theme = ThemeData(
       useMaterial3: true,
-      scaffoldBackgroundColor: isDark ? const Color(0xFF0B1220) : _canvas,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: _forest,
-        brightness: isDark ? Brightness.dark : Brightness.light,
-        surface: isDark ? const Color(0xFF17211F) : _paper,
-      ),
+      brightness: isDark ? Brightness.dark : Brightness.light,
+      scaffoldBackgroundColor: isDark ? _darkCanvas : _canvas,
+      colorScheme: colorScheme,
       textTheme:
           ThemeData(brightness: isDark ? Brightness.dark : Brightness.light)
               .textTheme
               .apply(
-                bodyColor: isDark ? const Color(0xFFF7F3EA) : _ink,
-                displayColor: isDark ? const Color(0xFFF7F3EA) : _ink,
+                bodyColor: colorScheme.onSurface,
+                displayColor: colorScheme.onSurface,
               ),
-      dividerColor: isDark ? const Color(0xFF2D3A4B) : _line,
+      dividerColor: colorScheme.outline,
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: _themeMode == ThemeMode.dark
-            ? const Color(0xFF202C29)
-            : _canvas,
+        fillColor: isDark ? _darkElevated : _canvas,
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 16,
           vertical: 16,
         ),
-        hintStyle: const TextStyle(color: _muted),
+        hintStyle: TextStyle(color: colorScheme.onSurfaceVariant),
         border: OutlineInputBorder(
-          borderSide: BorderSide.none,
+          borderSide: BorderSide(color: colorScheme.outline),
           borderRadius: BorderRadius.circular(14),
         ),
         enabledBorder: OutlineInputBorder(
-          borderSide: const BorderSide(color: _line),
+          borderSide: BorderSide(color: colorScheme.outline),
           borderRadius: BorderRadius.circular(14),
         ),
         focusedBorder: OutlineInputBorder(
-          borderSide: const BorderSide(color: _forest, width: 1.5),
+          borderSide: BorderSide(color: colorScheme.primary, width: 1.5),
           borderRadius: BorderRadius.circular(14),
         ),
       ),
       navigationBarTheme: NavigationBarThemeData(
-        backgroundColor: _themeMode == ThemeMode.dark
-            ? const Color(0xFF17211F)
-            : _paper,
-        indicatorColor: _mint,
+        backgroundColor: colorScheme.surface,
+        indicatorColor: colorScheme.primaryContainer,
         labelTextStyle: const WidgetStatePropertyAll(
           TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
         ),
@@ -383,7 +461,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
       padding: EdgeInsets.fromLTRB(isWide ? 32 : 20, 14, isWide ? 36 : 20, 10),
       child: Row(
         children: [
-          if (!isWide) const _BrandMark(),
+          if (!isWide) const _BrandMonogram(),
           if (!isWide) const Spacer(),
           const _SandboxPill(),
           SizedBox(width: isWide ? 12 : 4),
@@ -393,6 +471,15 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
               onPressed: _loading ? null : _reloadInvoices,
               icon: const Icon(Icons.refresh_rounded),
             ),
+          IconButton(
+            tooltip: _accountEmail ?? 'Sign in or create an account',
+            onPressed: _showAccountDialog,
+            icon: Icon(
+              _accountEmail == null
+                  ? Icons.person_outline_rounded
+                  : Icons.account_circle_outlined,
+            ),
+          ),
           IconButton(
             tooltip: _themeMode == ThemeMode.light
                 ? 'Switch to dark theme'
@@ -404,17 +491,6 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
                   : Icons.light_mode_outlined,
             ),
           ),
-          if (isWide) ...[
-            const SizedBox(width: 8),
-            const CircleAvatar(
-              radius: 18,
-              backgroundColor: _mint,
-              child: Text(
-                'A',
-                style: TextStyle(color: _forest, fontWeight: FontWeight.w700),
-              ),
-            ),
-          ],
         ],
       ),
     );
@@ -425,7 +501,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
       width: 244,
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        border: const Border(right: BorderSide(color: _line)),
+        border: Border(right: BorderSide(color: context.appBorder)),
       ),
       padding: const EdgeInsets.fromLTRB(24, 28, 18, 24),
       child: Column(
@@ -444,29 +520,33 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surfaceContainerLow,
               borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: _line),
+              border: Border.all(color: context.appBorder),
             ),
-            child: const Column(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(Icons.shield_outlined, color: _forest, size: 20),
-                SizedBox(height: 12),
-                Text(
+                Icon(Icons.shield_outlined, color: context.appAccent, size: 20),
+                const SizedBox(height: 12),
+                const Text(
                   'A little more peace of mind.',
                   style: TextStyle(fontWeight: FontWeight.w600),
                 ),
-                SizedBox(height: 5),
+                const SizedBox(height: 5),
                 Text(
                   'Checkout stays in the sandbox until you are ready.',
-                  style: TextStyle(color: _muted, fontSize: 12, height: 1.45),
+                  style: TextStyle(
+                    color: context.appMutedText,
+                    fontSize: 12,
+                    height: 1.45,
+                  ),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 18),
-          const Text(
+          Text(
             'ALVAPAY  ·  SANDBOX',
-            style: TextStyle(color: _muted, fontSize: 10),
+            style: TextStyle(color: context.appMutedText, fontSize: 10),
           ),
         ],
       ),
@@ -478,7 +558,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Material(
-        color: selected ? _mint.withValues(alpha: 0.65) : Colors.transparent,
+        color: selected ? context.appAccentContainer : Colors.transparent,
         borderRadius: BorderRadius.circular(13),
         child: InkWell(
           onTap: () => setState(() => _selectedIndex = index),
@@ -488,12 +568,20 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
             child: Row(
               children: [
                 const SizedBox(width: 14),
-                Icon(icon, size: 20, color: selected ? _forest : _muted),
+                Icon(
+                  icon,
+                  size: 20,
+                  color: selected
+                      ? context.appOnAccentContainer
+                      : context.appMutedText,
+                ),
                 const SizedBox(width: 12),
                 Text(
                   label,
                   style: TextStyle(
-                    color: selected ? _forest : _muted,
+                    color: selected
+                        ? context.appOnAccentContainer
+                        : context.appMutedText,
                     fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                   ),
                 ),
@@ -517,7 +605,10 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
         isBusy: _isInvoiceBusy,
         onRefresh: _reloadInvoices,
       ),
-      2 => AssistantPage(onCreateInvoice: _openComposer),
+      2 => AssistantPage(
+        onCreateInvoice: _openComposer,
+        loadCashFlowSummary: _backend.cashFlowSummary,
+      ),
       _ => DashboardPage(
         invoices: _invoices,
         onCreateInvoice: _openComposer,
@@ -526,6 +617,246 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
       ),
     };
   }
+}
+
+class AccountDialog extends StatefulWidget {
+  const AccountDialog({
+    required this.accountEmail,
+    required this.onLogin,
+    required this.onRegister,
+    required this.onLogout,
+    super.key,
+  });
+
+  final String? accountEmail;
+  final Future<void> Function(String email, String password) onLogin;
+  final Future<void> Function(String email, String password) onRegister;
+  final Future<void> Function() onLogout;
+
+  @override
+  State<AccountDialog> createState() => _AccountDialogState();
+}
+
+class _AccountDialogState extends State<AccountDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _emailController;
+  final _passwordController = TextEditingController();
+  bool _creatingAccount = false;
+  bool _submitting = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _emailController = TextEditingController(text: widget.accountEmail ?? '');
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      final email = _emailController.text.trim().toLowerCase();
+      final password = _passwordController.text;
+      if (_creatingAccount) {
+        await widget.onRegister(email, password);
+      } else {
+        await widget.onLogin(email, password);
+      }
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) setState(() => _error = _friendlyError(error));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  Future<void> _signOut() async {
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      await widget.onLogout();
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) setState(() => _error = _friendlyError(error));
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.accountEmail case final email?) {
+      return AlertDialog(
+        title: const Text('Your AlvaPay account'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(email, style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            const Text(
+              'Your invoices are private to this account.',
+              style: TextStyle(height: 1.5),
+            ),
+            if (_error case final error?) ...[
+              const SizedBox(height: 12),
+              Text(
+                error,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: _submitting ? null : _signOut,
+            child: const Text('Sign out'),
+          ),
+          FilledButton(
+            onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+            child: const Text('Done'),
+          ),
+        ],
+      );
+    }
+
+    final colorScheme = Theme.of(context).colorScheme;
+    return AlertDialog(
+      title: Text(_creatingAccount ? 'Create your account' : 'Welcome back'),
+      content: SizedBox(
+        width: 380,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  _creatingAccount
+                      ? 'Create a private workspace for your invoices.'
+                      : 'Sign in to your private invoice workspace.',
+                  style: const TextStyle(height: 1.5),
+                ),
+                const SizedBox(height: 18),
+                TextFormField(
+                  key: const Key('account-email'),
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  textInputAction: TextInputAction.next,
+                  autofillHints: const [AutofillHints.email],
+                  decoration: const InputDecoration(
+                    labelText: 'Email address',
+                    prefixIcon: Icon(Icons.mail_outline_rounded),
+                  ),
+                  validator: (value) {
+                    final email = value?.trim() ?? '';
+                    return RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email)
+                        ? null
+                        : 'Enter a valid email address.';
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  key: const Key('account-password'),
+                  controller: _passwordController,
+                  obscureText: true,
+                  textInputAction: TextInputAction.done,
+                  autofillHints: const [AutofillHints.password],
+                  onFieldSubmitted: (_) => _submit(),
+                  decoration: const InputDecoration(
+                    labelText: 'Password',
+                    prefixIcon: Icon(Icons.lock_outline_rounded),
+                  ),
+                  validator: (value) {
+                    if ((value ?? '').length < 12) {
+                      return 'Use at least 12 characters.';
+                    }
+                    return null;
+                  },
+                ),
+                if (_creatingAccount) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Use at least 12 characters. Password recovery is not '
+                    'available in this MVP.',
+                    style: TextStyle(
+                      color: colorScheme.onSurfaceVariant,
+                      fontSize: 12,
+                      height: 1.45,
+                    ),
+                  ),
+                ],
+                if (_error case final error?) ...[
+                  const SizedBox(height: 12),
+                  Text(error, style: TextStyle(color: colorScheme.error)),
+                ],
+                const SizedBox(height: 16),
+                if (_submitting)
+                  const Center(
+                    child: CircularProgressIndicator(
+                      semanticsLabel: 'Signing in',
+                    ),
+                  )
+                else
+                  FilledButton(
+                    onPressed: _submit,
+                    style: const ButtonStyle(
+                      minimumSize: WidgetStatePropertyAll(Size.fromHeight(48)),
+                    ),
+                    child: Text(
+                      _creatingAccount ? 'Create account' : 'Sign in',
+                    ),
+                  ),
+                TextButton(
+                  onPressed: _submitting
+                      ? null
+                      : () => setState(() {
+                          _creatingAccount = !_creatingAccount;
+                          _error = null;
+                        }),
+                  child: Text(
+                    _creatingAccount
+                        ? 'Already have an account? Sign in'
+                        : 'New to AlvaPay? Create an account',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
+}
+
+String _friendlyError(Object error) {
+  if (error is AlvaPayApiException) return error.message;
+  if (error is TimeoutException) {
+    return 'The request took too long. Check your connection and try again.';
+  }
+  if (error is FormatException) {
+    return 'AlvaPay received an invalid response. Refresh and try again.';
+  }
+  return 'AlvaPay could not reach the backend. Check its URL and try again.';
 }
 
 Map<String, int> _totalsByCurrency(Iterable<Invoice> invoices) {
@@ -621,7 +952,7 @@ class DashboardPage extends StatelessWidget {
                   onPressed: onCreateInvoice,
                   icon: const Icon(Icons.add_rounded),
                   label: const Text('New invoice'),
-                  style: _primaryButtonStyle(),
+                  style: _primaryButtonStyle(context),
                 ),
             ],
           ),
@@ -633,7 +964,7 @@ class DashboardPage extends StatelessWidget {
                 onPressed: onCreateInvoice,
                 icon: const Icon(Icons.add_rounded),
                 label: const Text('Create an invoice'),
-                style: _primaryButtonStyle(),
+                style: _primaryButtonStyle(context),
               ),
             ),
           ],
@@ -713,9 +1044,9 @@ class DashboardPage extends StatelessWidget {
           const SizedBox(height: 8),
           _ActivityCard(invoices: recent),
           const SizedBox(height: 16),
-          const Text(
+          Text(
             'Payment states update only after server verification.',
-            style: TextStyle(fontSize: 11, color: _muted),
+            style: TextStyle(fontSize: 11, color: context.appMutedText),
           ),
         ],
       ),
@@ -738,6 +1069,12 @@ class _MomentumCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     final isWide = width >= 720;
+    final cardBackground = Theme.of(context).brightness == Brightness.dark
+        ? context.appAccentContainer
+        : _forest;
+    final cardForeground = Theme.of(context).brightness == Brightness.dark
+        ? context.appOnAccentContainer
+        : Colors.white;
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -745,10 +1082,10 @@ class _MomentumCard extends StatelessWidget {
           children: [
             const _BrandMonogram(),
             const SizedBox(width: 10),
-            const Text(
+            Text(
               'YOUR MOMENTUM',
               style: TextStyle(
-                color: Colors.white70,
+                color: cardForeground.withValues(alpha: 0.78),
                 fontSize: 10,
                 letterSpacing: 1.8,
               ),
@@ -758,10 +1095,10 @@ class _MomentumCard extends StatelessWidget {
         ),
         const SizedBox(height: 26),
         if (awaitingTotals.isEmpty)
-          const Text(
+          Text(
             'No open invoices',
             style: TextStyle(
-              color: Colors.white,
+              color: cardForeground,
               fontSize: 27,
               height: 1.1,
               letterSpacing: -0.8,
@@ -776,7 +1113,7 @@ class _MomentumCard extends StatelessWidget {
                 awaitingTotals.keys.elementAt(index),
               ),
               style: TextStyle(
-                color: Colors.white,
+                color: cardForeground,
                 fontSize: index == 0 ? 34 : 18,
                 height: 1.1,
                 letterSpacing: -0.8,
@@ -789,7 +1126,10 @@ class _MomentumCard extends StatelessWidget {
           awaitingTotals.isEmpty
               ? 'Your verified records, in one place'
               : 'Still on its way to you',
-          style: TextStyle(color: Colors.white70, fontSize: 13),
+          style: TextStyle(
+            color: cardForeground.withValues(alpha: 0.82),
+            fontSize: 13,
+          ),
         ),
         const SizedBox(height: 23),
         Container(height: 1, color: Colors.white.withValues(alpha: 0.18)),
@@ -828,11 +1168,11 @@ class _MomentumCard extends StatelessWidget {
       width: double.infinity,
       padding: EdgeInsets.all(isWide ? 27 : 21),
       decoration: BoxDecoration(
-        color: _forest,
+        color: cardBackground,
         borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
-            color: _forest.withValues(alpha: 0.12),
+            color: cardBackground.withValues(alpha: 0.24),
             blurRadius: 28,
             offset: const Offset(0, 12),
           ),
@@ -925,12 +1265,13 @@ class _MetricCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       constraints: const BoxConstraints(minWidth: 145),
       padding: const EdgeInsets.all(17),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        border: Border.all(color: _line),
+        border: Border.all(color: context.appBorder),
         borderRadius: BorderRadius.circular(18),
       ),
       child: Column(
@@ -942,10 +1283,14 @@ class _MetricCard extends StatelessWidget {
                 width: 31,
                 height: 31,
                 decoration: BoxDecoration(
-                  color: accent,
+                  color: isDark ? context.appAccentContainer : accent,
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Icon(icon, size: 17, color: _forest),
+                child: Icon(
+                  icon,
+                  size: 17,
+                  color: isDark ? context.appOnAccentContainer : _forest,
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -954,7 +1299,7 @@ class _MetricCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.end,
-                  style: const TextStyle(fontSize: 11, color: _muted),
+                  style: TextStyle(fontSize: 11, color: context.appMutedText),
                 ),
               ),
             ],
@@ -965,7 +1310,10 @@ class _MetricCard extends StatelessWidget {
             style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 3),
-          Text(caption, style: const TextStyle(fontSize: 11, color: _muted)),
+          Text(
+            caption,
+            style: TextStyle(fontSize: 11, color: context.appMutedText),
+          ),
         ],
       ),
     );
@@ -1003,7 +1351,7 @@ class _ActivityCard extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        border: Border.all(color: _line),
+        border: Border.all(color: context.appBorder),
         borderRadius: BorderRadius.circular(18),
       ),
       child: Column(
@@ -1019,9 +1367,9 @@ class _ActivityCard extends StatelessWidget {
               isBusy: isBusy?.call(invoices[index]) ?? false,
             ),
             if (index != invoices.length - 1)
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16),
-                child: Divider(height: 1, color: _line),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Divider(height: 1, color: context.appBorder),
               ),
           ],
         ],
@@ -1097,14 +1445,14 @@ class _InvoiceListState extends State<InvoiceList> {
                   onPressed: widget.onCreateInvoice,
                   icon: const Icon(Icons.add_rounded),
                   label: const Text('New'),
-                  style: _primaryButtonStyle(),
+                  style: _primaryButtonStyle(context),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-            const Text(
+            Text(
               'Every detail, in one thoughtful place.',
-              style: TextStyle(color: _muted),
+              style: TextStyle(color: context.appMutedText),
             ),
             const SizedBox(height: 22),
             Wrap(
@@ -1115,10 +1463,16 @@ class _InvoiceListState extends State<InvoiceList> {
                     label: Text(filter),
                     selected: _filter == filter,
                     onSelected: (_) => setState(() => _filter = filter),
-                    selectedColor: _mint,
-                    side: BorderSide(color: _filter == filter ? _mint : _line),
+                    selectedColor: context.appAccentContainer,
+                    side: BorderSide(
+                      color: _filter == filter
+                          ? context.appAccentContainer
+                          : context.appBorder,
+                    ),
                     labelStyle: TextStyle(
-                      color: _filter == filter ? _forest : _muted,
+                      color: _filter == filter
+                          ? context.appOnAccentContainer
+                          : context.appMutedText,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -1148,9 +1502,9 @@ class _InvoiceListState extends State<InvoiceList> {
                 isBusy: widget.isBusy,
               ),
             const SizedBox(height: 14),
-            const Text(
+            Text(
               'Payment status is confirmed by the AlvaPay backend, never by a redirect.',
-              style: TextStyle(fontSize: 11, color: _muted),
+              style: TextStyle(fontSize: 11, color: context.appMutedText),
             ),
           ],
         ),
@@ -1159,10 +1513,45 @@ class _InvoiceListState extends State<InvoiceList> {
   }
 }
 
-class AssistantPage extends StatelessWidget {
-  const AssistantPage({required this.onCreateInvoice, super.key});
+class AssistantPage extends StatefulWidget {
+  const AssistantPage({
+    required this.onCreateInvoice,
+    required this.loadCashFlowSummary,
+    super.key,
+  });
 
   final VoidCallback onCreateInvoice;
+  final Future<CashFlowSummary> Function() loadCashFlowSummary;
+
+  @override
+  State<AssistantPage> createState() => _AssistantPageState();
+}
+
+class _AssistantPageState extends State<AssistantPage> {
+  CashFlowSummary? _summary;
+  String? _summaryError;
+  bool _loadingSummary = false;
+
+  Future<void> _generateSummary() async {
+    setState(() {
+      _loadingSummary = true;
+      _summaryError = null;
+    });
+    try {
+      final summary = await widget.loadCashFlowSummary();
+      if (!mounted) return;
+      setState(() {
+        _summary = summary;
+        _loadingSummary = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _summaryError = _friendlyError(error);
+        _loadingSummary = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1183,16 +1572,16 @@ class AssistantPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
-          const Text(
+          Text(
             'Describe the work in your own words. Alva turns it into an editable invoice draft; nothing is saved or sent until you review it.',
-            style: TextStyle(color: _muted, height: 1.55),
+            style: TextStyle(color: context.appMutedText, height: 1.55),
           ),
           const SizedBox(height: 22),
           Container(
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surface,
-              border: Border.all(color: _line),
+              border: Border.all(color: context.appBorder),
               borderRadius: BorderRadius.circular(20),
             ),
             child: const Row(
@@ -1211,15 +1600,96 @@ class AssistantPage extends StatelessWidget {
           ),
           const SizedBox(height: 22),
           FilledButton.icon(
-            onPressed: onCreateInvoice,
+            onPressed: widget.onCreateInvoice,
             icon: const Icon(Icons.auto_awesome_outlined),
             label: const Text('Draft an invoice with AI'),
-            style: _primaryButtonStyle(),
+            style: _primaryButtonStyle(context),
           ),
-          const SizedBox(height: 14),
-          const Text(
-            'Cash-flow chat is not connected yet. Alva never invents payment records.',
-            style: TextStyle(color: _muted, fontSize: 12),
+          const SizedBox(height: 28),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surface,
+              border: Border.all(color: context.appBorder),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Verified cash flow',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Alva summarizes only payments verified by PayPal. '
+                  'Pending and unpaid invoices are excluded.',
+                  style: TextStyle(color: context.appMutedText, height: 1.5),
+                ),
+                const SizedBox(height: 16),
+                if (_summary case final summary?) ...[
+                  Text(summary.summary, style: const TextStyle(height: 1.5)),
+                  if (summary.totalsByCurrency.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    for (final total in summary.totalsByCurrency)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${total.currency} · ${total.paidInvoiceCount} '
+                                '${total.paidInvoiceCount == 1 ? 'payment' : 'payments'}',
+                                style: TextStyle(color: context.appMutedText),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            Text(
+                              total.received,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ],
+                if (_summaryError case final error?) ...[
+                  Text(
+                    error,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                if (_loadingSummary)
+                  const Center(
+                    child: CircularProgressIndicator(
+                      semanticsLabel: 'Generating verified cash-flow summary',
+                    ),
+                  )
+                else
+                  OutlinedButton.icon(
+                    onPressed: _generateSummary,
+                    icon: const Icon(Icons.auto_awesome_outlined),
+                    label: Text(
+                      _summaryError == null
+                          ? 'Generate cash-flow summary'
+                          : 'Try again',
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(48, 48),
+                      foregroundColor: context.appAccent,
+                      side: BorderSide(color: context.appBorder),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ],
       ),
@@ -1377,7 +1847,7 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
                     width: 38,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: _line,
+                      color: context.appBorder,
                       borderRadius: BorderRadius.circular(8),
                     ),
                   ),
@@ -1394,16 +1864,16 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                const Text(
+                Text(
                   'Shape the details. Your client never sees a thing until you say so.',
-                  style: TextStyle(color: _muted, height: 1.4),
+                  style: TextStyle(color: context.appMutedText, height: 1.4),
                 ),
                 const SizedBox(height: 22),
                 Container(
                   padding: const EdgeInsets.all(15),
                   decoration: BoxDecoration(
                     color: Theme.of(context).colorScheme.surfaceContainerLow,
-                    border: Border.all(color: _line),
+                    border: Border.all(color: context.appBorder),
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Column(
@@ -1572,8 +2042,8 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
                   style: OutlinedButton.styleFrom(
                     alignment: Alignment.centerLeft,
                     minimumSize: const Size.fromHeight(50),
-                    foregroundColor: _ink,
-                    side: const BorderSide(color: _line),
+                    foregroundColor: context.appText,
+                    side: BorderSide(color: context.appBorder),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14),
                     ),
@@ -1584,16 +2054,16 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
                   padding: const EdgeInsets.all(14),
                   decoration: BoxDecoration(
                     color: Theme.of(context).colorScheme.surfaceContainerLow,
-                    border: Border.all(color: _line),
+                    border: Border.all(color: context.appBorder),
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: const Row(
+                  child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Icon(
                         Icons.auto_awesome_outlined,
                         size: 18,
-                        color: _forest,
+                        color: context.appAccent,
                       ),
                       SizedBox(width: 10),
                       Expanded(
@@ -1608,7 +2078,7 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
                 const SizedBox(height: 18),
                 FilledButton(
                   onPressed: _saving ? null : _save,
-                  style: _primaryButtonStyle(),
+                  style: _primaryButtonStyle(context),
                   child: _saving
                       ? const SizedBox(
                           width: 20,
@@ -1660,7 +2130,7 @@ class CheckoutConfirmationSheet extends StatelessWidget {
             padding: const EdgeInsets.all(18),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surfaceContainerLow,
-              border: Border.all(color: _line),
+              border: Border.all(color: context.appBorder),
               borderRadius: BorderRadius.circular(16),
             ),
             child: Column(
@@ -1673,7 +2143,7 @@ class CheckoutConfirmationSheet extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                   invoice.customerEmail,
-                  style: const TextStyle(color: _muted),
+                  style: TextStyle(color: context.appMutedText),
                 ),
                 const SizedBox(height: 18),
                 Text(
@@ -1689,15 +2159,19 @@ class CheckoutConfirmationSheet extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text(
                   invoice.description,
-                  style: const TextStyle(color: _muted),
+                  style: TextStyle(color: context.appMutedText),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 14),
-          const Text(
+          Text(
             'You’ll continue to PayPal Sandbox to approve this payment. AlvaPay will not mark it paid unless the backend verifies the completed order.',
-            style: TextStyle(color: _muted, height: 1.45, fontSize: 12),
+            style: TextStyle(
+              color: context.appMutedText,
+              height: 1.45,
+              fontSize: 12,
+            ),
           ),
           const SizedBox(height: 20),
           Row(
@@ -1717,7 +2191,7 @@ class CheckoutConfirmationSheet extends StatelessWidget {
                 child: FilledButton(
                   key: const Key('confirm-checkout'),
                   onPressed: () => Navigator.of(context).pop(true),
-                  style: _primaryButtonStyle(),
+                  style: _primaryButtonStyle(context),
                   child: const Text('Confirm & continue'),
                 ),
               ),
@@ -1783,11 +2257,15 @@ class _InvoiceRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final statusColor = switch (invoice.status) {
-      InvoiceStatus.paid => const Color(0xFF347359),
-      InvoiceStatus.awaiting => const Color(0xFF9B6B19),
-      InvoiceStatus.processing => const Color(0xFF54718A),
-      InvoiceStatus.draft => _muted,
+      InvoiceStatus.paid =>
+        isDark ? const Color(0xFF81C995) : const Color(0xFF347359),
+      InvoiceStatus.awaiting =>
+        isDark ? const Color(0xFFE4BE68) : const Color(0xFF9B6B19),
+      InvoiceStatus.processing =>
+        isDark ? const Color(0xFF98BCD8) : const Color(0xFF54718A),
+      InvoiceStatus.draft => context.appMutedText,
     };
     final statusText = switch (invoice.status) {
       InvoiceStatus.paid => 'Paid',
@@ -1815,10 +2293,10 @@ class _InvoiceRow extends StatelessWidget {
                   color: Theme.of(context).colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(13),
                 ),
-                child: const Icon(
+                child: Icon(
                   Icons.description_outlined,
                   size: 19,
-                  color: _forest,
+                  color: context.appAccent,
                 ),
               ),
               const SizedBox(width: 13),
@@ -1834,7 +2312,10 @@ class _InvoiceRow extends StatelessWidget {
                     Text(
                       '${invoice.description}'
                       '${invoice.dueDate == null ? '' : '  ·  Due ${_formatDate(invoice.dueDate!)}'}',
-                      style: const TextStyle(color: _muted, fontSize: 11),
+                      style: TextStyle(
+                        color: context.appMutedText,
+                        fontSize: 11,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -1859,6 +2340,7 @@ class _InvoiceRow extends StatelessWidget {
                       const SizedBox(width: 4),
                       Text(
                         statusText,
+                        key: Key('invoice-status-${invoice.id}'),
                         style: TextStyle(fontSize: 10, color: statusColor),
                       ),
                     ],
@@ -1990,22 +2472,27 @@ class _BrandMonogram extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 31,
-      height: 31,
-      decoration: BoxDecoration(
-        color: _forest,
-        borderRadius: BorderRadius.circular(11),
-      ),
-      child: const Center(
-        child: Text(
-          'A',
-          style: TextStyle(
-            color: _gold,
-            fontFamily: 'serif',
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-            height: 1,
+    return Semantics(
+      label: 'AlvaPay',
+      child: Container(
+        width: 31,
+        height: 31,
+        decoration: BoxDecoration(
+          color: Theme.of(context).brightness == Brightness.dark
+              ? _darkCanvas
+              : _forest,
+          borderRadius: BorderRadius.circular(11),
+        ),
+        child: const Center(
+          child: Text(
+            'A',
+            style: TextStyle(
+              color: _gold,
+              fontFamily: 'serif',
+              fontSize: 20,
+              fontWeight: FontWeight.w600,
+              height: 1,
+            ),
           ),
         ),
       ),
@@ -2021,16 +2508,20 @@ class _SandboxPill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
       decoration: BoxDecoration(
-        color: const Color(0xFFEAF0E8),
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(24),
       ),
-      child: const Row(
+      child: Row(
         children: [
           Icon(Icons.circle, color: Color(0xFF5B8669), size: 7),
           SizedBox(width: 6),
           Text(
             'SANDBOX',
-            style: TextStyle(fontSize: 9, letterSpacing: 1, color: _forest),
+            style: TextStyle(
+              fontSize: 9,
+              letterSpacing: 1,
+              color: context.appText,
+            ),
           ),
         ],
       ),
@@ -2047,8 +2538,8 @@ class _Eyebrow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       text,
-      style: const TextStyle(
-        color: _muted,
+      style: TextStyle(
+        color: context.appMutedText,
         fontSize: 10,
         letterSpacing: 1.5,
         fontWeight: FontWeight.w600,
@@ -2076,18 +2567,18 @@ class _EmptyState extends StatelessWidget {
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: _line),
+        border: Border.all(color: context.appBorder),
       ),
       child: Column(
         children: [
-          Icon(icon, color: _muted, size: 24),
+          Icon(icon, color: context.appMutedText, size: 24),
           const SizedBox(height: 9),
           Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 5),
           Text(
             message,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: _muted, fontSize: 12),
+            style: TextStyle(color: context.appMutedText, fontSize: 12),
           ),
         ],
       ),
@@ -2107,17 +2598,17 @@ class _SuggestionChip extends StatelessWidget {
       onPressed: onTap,
       avatar: const Icon(Icons.arrow_outward_rounded, size: 14),
       label: Text(label),
-      backgroundColor: Colors.white,
-      side: const BorderSide(color: _line),
+      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+      side: BorderSide(color: context.appBorder),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
     );
   }
 }
 
-ButtonStyle _primaryButtonStyle() {
+ButtonStyle _primaryButtonStyle(BuildContext context) {
   return FilledButton.styleFrom(
-    backgroundColor: _forest,
-    foregroundColor: Colors.white,
+    backgroundColor: context.appAccent,
+    foregroundColor: context.appOnAccent,
     minimumSize: const Size(48, 50),
     padding: const EdgeInsets.symmetric(horizontal: 20),
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),

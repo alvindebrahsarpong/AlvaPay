@@ -18,12 +18,16 @@ and must not mistake a browser redirect for a completed payment.
 1. The user describes an invoice in natural language.
 2. The FastAPI backend requests a schema-constrained draft from Anthropic
    Claude and validates it with Pydantic.
-3. The user reviews and edits the details, then saves the invoice to
-   owner-scoped SQLite storage.
-4. The user explicitly confirms the exact amount and currency.
-5. The backend creates a PayPal Sandbox Checkout Orders v2 order and returns
+3. For cash-flow summaries, the server aggregates only owner-scoped invoices
+   with `PAID` status and a verified PayPal capture ID. It sends currency-
+   grouped counts and totals (not customer or invoice details) to Claude.
+4. The user reviews and edits the details, then saves the invoice to
+   account-scoped SQLite storage. Email/password registration and sign-in use
+   backend-hashed passwords; signing out revokes the active session.
+5. The user explicitly confirms the exact amount and currency.
+6. The backend creates a PayPal Sandbox Checkout Orders v2 order and returns
    only its verified Sandbox approval link to the Flutter client.
-6. After the buyer approves, the user asks AlvaPay to verify/capture the
+7. After the buyer approves, the user asks AlvaPay to verify/capture the
    order. The backend checks PayPal's order and capture status, amount, and
    currency before marking the invoice paid.
 
@@ -61,6 +65,8 @@ payment.
 - No provider secrets are included in Flutter or source control.
 - Session bearer tokens are stored as hashes by the backend and in platform
   secure storage by the app.
+- Passwords use PBKDF2-SHA256 hashes. Each account has one active session;
+  password recovery and email verification are not included in this MVP.
 - Invoice records are scoped to the session that created them.
 - Checkout requires an explicit user action and matching amount/currency.
 - Payment status is not trusted from the app or from a success redirect.
@@ -71,7 +77,7 @@ payment.
 
 This is an MVP, not a production accounting system. The current repository
 does not implement receipt-photo extraction, payment webhooks, reminders,
-AI cash-flow summaries/chat, multi-provider AI support, PostgreSQL, or
+conversational cash-flow chat, multi-provider AI support, PostgreSQL, or
 production PayPal checkout. No live AI request or Sandbox payment has been
 verified in the development environment. Follow the setup and deployment
 notes in the [README](../README.md), and report these limitations honestly in

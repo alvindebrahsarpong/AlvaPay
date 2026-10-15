@@ -21,6 +21,8 @@
 **Say:** “Freelancers often turn a short project brief into a long sequence of
 manual invoice and payment steps. AlvaPay makes the draft faster without
 letting AI send a payment request or mark money as paid on its own.”
+“Invoices belong to a private email-and-password workspace, and signing out
+revokes its backend session.”
 
 ### 0:20–0:55 — Draft from a brief
 
@@ -67,11 +69,17 @@ amount and currency, and only then records the verified payment.”
 the provider cannot confirm the capture, the app reports the error instead of
 showing a success state.”
 
-### 2:30–2:45 — Close
+**Action:** Open the Alva AI tab and generate a verified cash-flow summary.
+
+**Say:** “For the summary, the server sends Claude only currency-grouped totals
+from this session's verified payments. Unpaid invoices and customer details
+are excluded.”
+
+### 2:35–2:45 — Close
 
 **Show:** The API diagram or repository.
 
 **Say:** “AlvaPay is Flutter plus FastAPI and SQLite, with provider secrets
 kept on the server. The current MVP supports text-based drafting and
 PayPal Sandbox checkout. Webhooks, reminders, receipt photos, and
-cash-flow chat are not implemented yet.”
+conversational cash-flow chat are not implemented yet.”

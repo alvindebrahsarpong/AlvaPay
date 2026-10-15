@@ -13,13 +13,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.ai import AIConfigurationError, AIProviderError, InvoiceDraftService
-from app.database import Database, IdempotencyConflictError
+from app.database import (
+    AccountAlreadyExistsError,
+    Database,
+    IdempotencyConflictError,
+)
 from app.paypal import (
     PayPalConfigurationError,
     PayPalService,
     PayPalServiceError,
 )
 from app.schemas import (
+    AccountCredentials,
+    AuthSessionOut,
+    CashFlowCurrencyTotal,
+    CashFlowSummaryOut,
     CheckoutConfirmation,
     InvoiceCreateRequest,
     InvoiceDraft,
@@ -82,6 +90,58 @@ def create_session(
     return {"token": database.create_session()}
 
 
+@app.post(
+    "/api/auth/register",
+    response_model=AuthSessionOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def register_account(
+    request: AccountCredentials,
+    database: Annotated[Database, Depends(get_database)],
+) -> AuthSessionOut:
+    try:
+        owner_id = database.create_account(request.email, request.password)
+    except AccountAlreadyExistsError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return AuthSessionOut(
+        token=database.create_session(owner_id),
+        email=request.email,
+    )
+
+
+@app.post("/api/auth/login", response_model=AuthSessionOut)
+def login_account(
+    request: AccountCredentials,
+    database: Annotated[Database, Depends(get_database)],
+) -> AuthSessionOut:
+    owner_id = database.authenticate_account(request.email, request.password)
+    if owner_id is None:
+        raise HTTPException(status_code=401, detail="Email or password is incorrect.")
+    return AuthSessionOut(
+        token=database.create_session(owner_id),
+        email=request.email,
+    )
+
+
+@app.post("/api/auth/logout")
+def logout_account(
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Depends(_bearer),
+    ],
+    database: Annotated[Database, Depends(get_database)],
+) -> dict[str, str]:
+    if credentials is None or database.owner_for_token(credentials.credentials) is None:
+        raise HTTPException(
+            status_code=401,
+            detail="This AlvaPay session is no longer valid.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not database.revoke_session(credentials.credentials):
+        raise HTTPException(status_code=401, detail="This AlvaPay session is no longer valid.")
+    return {"status": "signed_out"}
+
+
 def require_owner(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -121,6 +181,38 @@ async def create_invoice_draft(
         raise HTTPException(status_code=503, detail=str(error)) from error
     except AIProviderError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/ai/cash-flow-summary", response_model=CashFlowSummaryOut)
+async def create_cash_flow_summary(
+    database: Annotated[Database, Depends(get_database)],
+    service: Annotated[InvoiceDraftService, Depends(get_invoice_draft_service)],
+    owner_id: Annotated[str, Depends(require_owner)],
+) -> CashFlowSummaryOut:
+    totals = [
+        CashFlowCurrencyTotal.model_validate(total)
+        for total in database.verified_payment_totals(owner_id=owner_id)
+    ]
+    verified_invoice_count = sum(total.paid_invoice_count for total in totals)
+    if not totals:
+        return CashFlowSummaryOut(
+            verified_invoice_count=0,
+            totals_by_currency=[],
+            summary="No verified payments are recorded yet.",
+        )
+
+    try:
+        summary = await service.create_cash_flow_summary(totals)
+    except AIConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except AIProviderError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    return CashFlowSummaryOut(
+        verified_invoice_count=verified_invoice_count,
+        totals_by_currency=totals,
+        summary=summary.summary,
+    )
 
 
 @app.post("/api/invoices", response_model=InvoiceOut, status_code=status.HTTP_201_CREATED)

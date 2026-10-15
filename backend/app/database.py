@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -15,6 +16,45 @@ from app.schemas import InvoiceCreateRequest
 
 class IdempotencyConflictError(Exception):
     pass
+
+
+class AccountAlreadyExistsError(Exception):
+    pass
+
+
+_PASSWORD_ITERATIONS = 310_000
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        _PASSWORD_ITERATIONS,
+    )
+    return f"pbkdf2_sha256${_PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt_hex, expected_hex = stored_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256" or int(iterations) != _PASSWORD_ITERATIONS:
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(expected_hex)
+    except (TypeError, ValueError):
+        return False
+    actual = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        _PASSWORD_ITERATIONS,
+    )
+    return hmac.compare_digest(actual, expected)
+
+
+_DUMMY_PASSWORD_HASH = _hash_password("alvapay-nonexistent-account-password")
 
 
 class Database:
@@ -38,16 +78,64 @@ class Database:
         with self._lock:
             self._connection.close()
 
-    def create_session(self) -> str:
+    def create_account(self, email: str, password: str) -> str:
         owner_id = str(uuid4())
+        password_hash = _hash_password(password)
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM accounts WHERE email = ?",
+                (email,),
+            ).fetchone()
+            if existing is not None:
+                raise AccountAlreadyExistsError("An account with this email already exists.")
+            connection.execute(
+                """
+                INSERT INTO accounts (owner_id, email, password_hash, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (owner_id, email, password_hash, _now()),
+            )
+        return owner_id
+
+    def authenticate_account(self, email: str, password: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT owner_id, password_hash FROM accounts WHERE email = ?",
+                (email,),
+            ).fetchone()
+        password_hash = str(row["password_hash"]) if row is not None else _DUMMY_PASSWORD_HASH
+        if not _verify_password(password, password_hash) or row is None:
+            return None
+        return str(row["owner_id"])
+
+    def account_email(self, owner_id: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT email FROM accounts WHERE owner_id = ?",
+                (owner_id,),
+            ).fetchone()
+        return str(row["email"]) if row is not None else None
+
+    def create_session(self, owner_id: str | None = None) -> str:
+        owner_id = owner_id or str(uuid4())
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with self._transaction() as connection:
+            connection.execute("DELETE FROM sessions WHERE owner_id = ?", (owner_id,))
             connection.execute(
                 "INSERT INTO sessions (owner_id, token_hash, created_at) VALUES (?, ?, ?)",
                 (owner_id, token_hash, _now()),
             )
         return token
+
+    def revoke_session(self, token: str) -> bool:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+        return cursor.rowcount == 1
 
     def owner_for_token(self, token: str) -> str | None:
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -148,6 +236,28 @@ class Database:
                 (owner_id,),
             ).fetchall()
         return [_public_invoice(row) for row in rows]
+
+    def verified_payment_totals(self, *, owner_id: str) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT currency, COUNT(*) AS paid_invoice_count,
+                    SUM(amount_cents) AS received_cents
+                FROM invoices
+                WHERE owner_id = ? AND status = 'PAID' AND paypal_capture_id IS NOT NULL
+                GROUP BY currency
+                ORDER BY currency
+                """,
+                (owner_id,),
+            ).fetchall()
+        return [
+            {
+                "currency": str(row["currency"]),
+                "paid_invoice_count": int(row["paid_invoice_count"]),
+                "received_cents": int(row["received_cents"]),
+            }
+            for row in rows
+        ]
 
     def get_invoice(self, invoice_id: str, *, owner_id: str) -> dict[str, object] | None:
         with self._lock:
@@ -280,6 +390,12 @@ class Database:
         with self._lock:
             self._connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS accounts (
+                    owner_id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS sessions (
                     owner_id TEXT PRIMARY KEY,
                     token_hash TEXT NOT NULL UNIQUE,

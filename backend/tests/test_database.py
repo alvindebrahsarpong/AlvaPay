@@ -33,6 +33,30 @@ def test_sessions_are_random_and_stored_as_hashes() -> None:
         database.close()
 
 
+def test_account_passwords_are_hashed_and_sessions_can_be_revoked() -> None:
+    database = Database(":memory:")
+    try:
+        owner_id = database.create_account("user@example.test", "correct-horse-battery")
+        password_hash = database._connection.execute(
+            "SELECT password_hash FROM accounts WHERE owner_id = ?",
+            (owner_id,),
+        ).fetchone()["password_hash"]
+        token = database.create_session(owner_id)
+
+        assert password_hash != "correct-horse-battery"
+        assert database.authenticate_account("user@example.test", "wrong-password") is None
+        assert database.authenticate_account(
+            "user@example.test",
+            "correct-horse-battery",
+        ) == owner_id
+        assert database.owner_for_token(token) == owner_id
+        assert database.revoke_session(token) is True
+        assert database.owner_for_token(token) is None
+        assert database.revoke_session(token) is False
+    finally:
+        database.close()
+
+
 def test_invoice_and_session_survive_database_reopen(tmp_path) -> None:
     path = tmp_path / "alvapay.sqlite3"
     first = Database(path)
@@ -141,5 +165,84 @@ def test_invoice_creation_is_idempotent_and_rejects_key_reuse() -> None:
                 owner_id=owner_id,
                 idempotency_key="invoice-create-request-0001",
             )
+    finally:
+        database.close()
+
+
+def test_verified_payment_totals_exclude_unpaid_invoices_and_other_owners() -> None:
+    database = Database(":memory:")
+    try:
+        owner_id = database.owner_for_token(database.create_session())
+        other_owner_id = database.owner_for_token(database.create_session())
+        assert owner_id is not None and other_owner_id is not None
+
+        def save_invoice(
+            invoice_owner: str,
+            *,
+            key: str,
+            amount_cents: int,
+            currency: str,
+        ) -> dict[str, object]:
+            request = _invoice_request().model_copy(
+                update={"amount_cents": amount_cents, "currency": currency}
+            )
+            return database.create_invoice(
+                request,
+                owner_id=invoice_owner,
+                idempotency_key=key,
+            )
+
+        def mark_paid(invoice: dict[str, object], invoice_owner: str) -> None:
+            invoice_id = str(invoice["id"])
+            database.begin_checkout(invoice_id, owner_id=invoice_owner)
+            database.save_order(
+                invoice_id,
+                owner_id=invoice_owner,
+                order_id=f"ORDER-{invoice_id}",
+                approval_url=(
+                    "https://www.sandbox.paypal.com/checkoutnow?token="
+                    f"ORDER-{invoice_id}"
+                ),
+            )
+            database.begin_capture(invoice_id, owner_id=invoice_owner)
+            database.mark_paid(
+                invoice_id,
+                owner_id=invoice_owner,
+                capture_id=f"CAPTURE-{invoice_id}",
+            )
+
+        paid_usd = save_invoice(
+            owner_id,
+            key="verified-usd-payment-0001",
+            amount_cents=8450,
+            currency="USD",
+        )
+        paid_eur = save_invoice(
+            owner_id,
+            key="verified-eur-payment-0001",
+            amount_cents=2500,
+            currency="EUR",
+        )
+        unpaid = save_invoice(
+            owner_id,
+            key="unpaid-invoice-0001",
+            amount_cents=17000,
+            currency="USD",
+        )
+        other_owner_paid = save_invoice(
+            other_owner_id,
+            key="other-owner-payment-0001",
+            amount_cents=99999,
+            currency="USD",
+        )
+        mark_paid(paid_usd, owner_id)
+        mark_paid(paid_eur, owner_id)
+        mark_paid(other_owner_paid, other_owner_id)
+
+        assert database.verified_payment_totals(owner_id=owner_id) == [
+            {"currency": "EUR", "paid_invoice_count": 1, "received_cents": 2500},
+            {"currency": "USD", "paid_invoice_count": 1, "received_cents": 8450},
+        ]
+        assert database.get_invoice(str(unpaid["id"]), owner_id=owner_id)["status"] == "DRAFT"
     finally:
         database.close()

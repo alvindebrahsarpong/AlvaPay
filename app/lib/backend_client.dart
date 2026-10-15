@@ -90,10 +90,76 @@ class InvoiceDraft {
   };
 }
 
+class CashFlowCurrencyTotal {
+  const CashFlowCurrencyTotal({
+    required this.currency,
+    required this.paidInvoiceCount,
+    required this.receivedCents,
+  });
+
+  factory CashFlowCurrencyTotal.fromJson(Map<String, dynamic> json) {
+    return CashFlowCurrencyTotal(
+      currency: _requiredString(json, 'currency'),
+      paidInvoiceCount: _requiredInt(json, 'paid_invoice_count'),
+      receivedCents: _requiredInt(json, 'received_cents'),
+    );
+  }
+
+  final String currency;
+  final int paidInvoiceCount;
+  final int receivedCents;
+
+  String get received =>
+      '$currency ${(receivedCents / 100).toStringAsFixed(2)}';
+}
+
+class CashFlowSummary {
+  const CashFlowSummary({
+    required this.verifiedInvoiceCount,
+    required this.totalsByCurrency,
+    required this.summary,
+  });
+
+  factory CashFlowSummary.fromJson(Map<String, dynamic> json) {
+    final totals = json['totals_by_currency'];
+    if (totals is! List) {
+      throw const FormatException('The API returned invalid cash-flow totals.');
+    }
+    return CashFlowSummary(
+      verifiedInvoiceCount: _requiredInt(json, 'verified_invoice_count'),
+      totalsByCurrency: totals
+          .map((item) {
+            if (item is! Map<String, dynamic>) {
+              throw const FormatException(
+                'The API returned an invalid cash-flow total.',
+              );
+            }
+            return CashFlowCurrencyTotal.fromJson(item);
+          })
+          .toList(growable: false),
+      summary: _requiredString(json, 'summary'),
+    );
+  }
+
+  final int verifiedInvoiceCount;
+  final List<CashFlowCurrencyTotal> totalsByCurrency;
+  final String summary;
+}
+
 abstract interface class AlvaPayBackend {
+  Future<String?> restoreAccount();
+
+  Future<void> register(String email, String password);
+
+  Future<void> login(String email, String password);
+
+  Future<void> logout();
+
   Future<List<Invoice>> listInvoices();
 
   Future<Map<String, dynamic>> analyzeInvoice(String text);
+
+  Future<CashFlowSummary> cashFlowSummary();
 
   Future<Invoice> createInvoice(
     InvoiceDraft draft, {
@@ -113,6 +179,12 @@ abstract interface class SessionTokenStore {
   Future<String?> read();
 
   Future<void> write(String token);
+
+  Future<String?> readAccountEmail();
+
+  Future<void> writeAccountEmail(String email);
+
+  Future<void> clear();
 }
 
 class SecureSessionTokenStore implements SessionTokenStore {
@@ -120,6 +192,7 @@ class SecureSessionTokenStore implements SessionTokenStore {
     : _storage = storage ?? const FlutterSecureStorage();
 
   static const _tokenKey = 'alvapay.private-session-token';
+  static const _accountEmailKey = 'alvapay.account-email';
   final FlutterSecureStorage _storage;
 
   @override
@@ -128,6 +201,19 @@ class SecureSessionTokenStore implements SessionTokenStore {
   @override
   Future<void> write(String token) =>
       _storage.write(key: _tokenKey, value: token);
+
+  @override
+  Future<String?> readAccountEmail() => _storage.read(key: _accountEmailKey);
+
+  @override
+  Future<void> writeAccountEmail(String email) =>
+      _storage.write(key: _accountEmailKey, value: email);
+
+  @override
+  Future<void> clear() async {
+    await _storage.delete(key: _tokenKey);
+    await _storage.delete(key: _accountEmailKey);
+  }
 }
 
 class AlvaPayApiException implements Exception {
@@ -158,6 +244,54 @@ class AlvaPayApi implements AlvaPayBackend {
   final SessionTokenStore _tokenStore;
   final Uri _baseUri;
   String? _sessionToken;
+  String? _accountEmail;
+
+  @override
+  Future<String?> restoreAccount() async {
+    _sessionToken ??= await _tokenStore.read();
+    if (_sessionToken == null || _sessionToken!.isEmpty) return null;
+    _accountEmail = await _tokenStore.readAccountEmail();
+    return _accountEmail;
+  }
+
+  @override
+  Future<void> register(String email, String password) =>
+      _authenticate('/api/auth/register', email, password);
+
+  @override
+  Future<void> login(String email, String password) =>
+      _authenticate('/api/auth/login', email, password);
+
+  Future<void> _authenticate(String path, String email, String password) async {
+    final response = await _send(
+      'POST',
+      path,
+      authenticated: false,
+      body: {'email': email, 'password': password},
+    );
+    if (response is! Map<String, dynamic> ||
+        response['token'] is! String ||
+        (response['token'] as String).isEmpty ||
+        response['email'] is! String) {
+      throw const FormatException('The API returned an invalid login session.');
+    }
+
+    final token = response['token'] as String;
+    final accountEmail = response['email'] as String;
+    await _tokenStore.clear();
+    await _tokenStore.write(token);
+    await _tokenStore.writeAccountEmail(accountEmail);
+    _sessionToken = token;
+    _accountEmail = accountEmail;
+  }
+
+  @override
+  Future<void> logout() async {
+    await _send('POST', '/api/auth/logout', authenticated: true);
+    await _tokenStore.clear();
+    _sessionToken = null;
+    _accountEmail = null;
+  }
 
   @override
   Future<List<Invoice>> listInvoices() async {
@@ -187,6 +321,21 @@ class AlvaPayApi implements AlvaPayBackend {
       throw const FormatException('The AI service returned an invalid draft.');
     }
     return response;
+  }
+
+  @override
+  Future<CashFlowSummary> cashFlowSummary() async {
+    final response = await _send(
+      'POST',
+      '/api/ai/cash-flow-summary',
+      authenticated: true,
+    );
+    if (response is! Map<String, dynamic>) {
+      throw const FormatException(
+        'The AI service returned an invalid cash-flow summary.',
+      );
+    }
+    return CashFlowSummary.fromJson(response);
   }
 
   @override
