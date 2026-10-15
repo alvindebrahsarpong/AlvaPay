@@ -1,4 +1,7 @@
+import hashlib
+import json
 import os
+import secrets
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -9,7 +12,9 @@ from uuid import uuid4
 
 from app.schemas import InvoiceCreateRequest
 
-_OWNER_ID = "local-owner"
+
+class IdempotencyConflictError(Exception):
+    pass
 
 
 class Database:
@@ -33,11 +38,40 @@ class Database:
         with self._lock:
             self._connection.close()
 
-    def create_invoice(self, invoice: InvoiceCreateRequest) -> dict[str, object]:
+    def create_session(self) -> str:
+        owner_id = str(uuid4())
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._transaction() as connection:
+            connection.execute(
+                "INSERT INTO sessions (owner_id, token_hash, created_at) VALUES (?, ?, ?)",
+                (owner_id, token_hash, _now()),
+            )
+        return token
+
+    def owner_for_token(self, token: str) -> str | None:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT owner_id FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+        return str(row["owner_id"]) if row is not None else None
+
+    def create_invoice(
+        self,
+        invoice: InvoiceCreateRequest,
+        *,
+        owner_id: str,
+        idempotency_key: str,
+    ) -> dict[str, object]:
         now = _now()
+        request_hash = hashlib.sha256(
+            json.dumps(invoice.model_dump(mode="json"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
         values: dict[str, object] = {
             "id": str(uuid4()),
-            "owner_id": _OWNER_ID,
+            "owner_id": owner_id,
             "customer_name": invoice.customer_name,
             "customer_email": invoice.customer_email,
             "service_description": invoice.service_description,
@@ -54,6 +88,27 @@ class Database:
             "updated_at": now,
         }
         with self._transaction() as connection:
+            previous = connection.execute(
+                """
+                SELECT request_hash, invoice_id
+                FROM invoice_idempotency
+                WHERE owner_id = ? AND idempotency_key = ?
+                """,
+                (owner_id, idempotency_key),
+            ).fetchone()
+            if previous is not None:
+                if previous["request_hash"] != request_hash:
+                    raise IdempotencyConflictError(
+                        "This idempotency key was already used with different invoice details."
+                    )
+                row = connection.execute(
+                    "SELECT * FROM invoices WHERE id = ? AND owner_id = ?",
+                    (previous["invoice_id"], owner_id),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("The saved idempotent invoice record is missing.")
+                return _public_invoice(row)
+
             connection.execute(
                 """
                 INSERT INTO invoices (
@@ -70,31 +125,44 @@ class Database:
                 """,
                 values,
             )
+            connection.execute(
+                """
+                INSERT INTO invoice_idempotency (
+                    owner_id, idempotency_key, request_hash, invoice_id
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (owner_id, idempotency_key, request_hash, values["id"]),
+            )
             row = connection.execute(
                 "SELECT * FROM invoices WHERE id = ? AND owner_id = ?",
-                (values["id"], _OWNER_ID),
+                (values["id"], owner_id),
             ).fetchone()
         if row is None:
             raise RuntimeError("Invoice insert did not return a saved record.")
         return _public_invoice(row)
 
-    def list_invoices(self) -> list[dict[str, object]]:
+    def list_invoices(self, *, owner_id: str) -> list[dict[str, object]]:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT * FROM invoices WHERE owner_id = ? ORDER BY created_at DESC",
-                (_OWNER_ID,),
+                (owner_id,),
             ).fetchall()
         return [_public_invoice(row) for row in rows]
 
-    def get_invoice(self, invoice_id: str) -> dict[str, object] | None:
+    def get_invoice(self, invoice_id: str, *, owner_id: str) -> dict[str, object] | None:
         with self._lock:
             row = self._connection.execute(
                 "SELECT * FROM invoices WHERE id = ? AND owner_id = ?",
-                (invoice_id, _OWNER_ID),
+                (invoice_id, owner_id),
             ).fetchone()
         return _public_invoice(row) if row is not None else None
 
-    def begin_checkout(self, invoice_id: str) -> dict[str, object] | None:
+    def begin_checkout(
+        self,
+        invoice_id: str,
+        *,
+        owner_id: str,
+    ) -> dict[str, object] | None:
         with self._transaction() as connection:
             connection.execute(
                 """
@@ -102,18 +170,30 @@ class Database:
                 SET status = 'ORDER_CREATING', updated_at = ?
                 WHERE id = ? AND owner_id = ? AND status = 'DRAFT'
                 """,
-                (_now(), invoice_id, _OWNER_ID),
+                (_now(), invoice_id, owner_id),
             )
             row = connection.execute(
                 "SELECT * FROM invoices WHERE id = ? AND owner_id = ?",
-                (invoice_id, _OWNER_ID),
+                (invoice_id, owner_id),
             ).fetchone()
-        return _public_invoice(row) if row is not None else None
+        return dict(row) if row is not None else None
+
+    def release_capture(self, invoice_id: str, *, owner_id: str) -> None:
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                UPDATE invoices
+                SET status = 'CHECKOUT_PENDING', updated_at = ?
+                WHERE id = ? AND owner_id = ? AND status = 'CAPTURE_IN_PROGRESS'
+                """,
+                (_now(), invoice_id, owner_id),
+            )
 
     def save_order(
         self,
         invoice_id: str,
         *,
+        owner_id: str,
         order_id: str,
         approval_url: str,
     ) -> dict[str, object]:
@@ -125,11 +205,11 @@ class Database:
                     updated_at = ?
                 WHERE id = ? AND owner_id = ? AND status = 'ORDER_CREATING'
                 """,
-                (order_id, approval_url, _now(), invoice_id, _OWNER_ID),
+                (order_id, approval_url, _now(), invoice_id, owner_id),
             )
             row = connection.execute(
                 "SELECT * FROM invoices WHERE id = ? AND owner_id = ?",
-                (invoice_id, _OWNER_ID),
+                (invoice_id, owner_id),
             ).fetchone()
         if row is None:
             raise RuntimeError("Invoice was not found while saving the PayPal order.")
@@ -137,7 +217,12 @@ class Database:
             raise RuntimeError("Invoice PayPal order state changed unexpectedly.")
         return _public_invoice(row)
 
-    def begin_capture(self, invoice_id: str) -> dict[str, object] | None:
+    def begin_capture(
+        self,
+        invoice_id: str,
+        *,
+        owner_id: str,
+    ) -> dict[str, object] | None:
         with self._transaction() as connection:
             connection.execute(
                 """
@@ -145,15 +230,21 @@ class Database:
                 SET status = 'CAPTURE_IN_PROGRESS', updated_at = ?
                 WHERE id = ? AND owner_id = ? AND status = 'CHECKOUT_PENDING'
                 """,
-                (_now(), invoice_id, _OWNER_ID),
+                (_now(), invoice_id, owner_id),
             )
             row = connection.execute(
                 "SELECT * FROM invoices WHERE id = ? AND owner_id = ?",
-                (invoice_id, _OWNER_ID),
+                (invoice_id, owner_id),
             ).fetchone()
-        return _public_invoice(row) if row is not None else None
+        return dict(row) if row is not None else None
 
-    def mark_paid(self, invoice_id: str, *, capture_id: str) -> dict[str, object]:
+    def mark_paid(
+        self,
+        invoice_id: str,
+        *,
+        owner_id: str,
+        capture_id: str,
+    ) -> dict[str, object]:
         with self._transaction() as connection:
             connection.execute(
                 """
@@ -161,11 +252,11 @@ class Database:
                 SET status = 'PAID', paypal_capture_id = ?, updated_at = ?
                 WHERE id = ? AND owner_id = ? AND status = 'CAPTURE_IN_PROGRESS'
                 """,
-                (capture_id, _now(), invoice_id, _OWNER_ID),
+                (capture_id, _now(), invoice_id, owner_id),
             )
             row = connection.execute(
                 "SELECT * FROM invoices WHERE id = ? AND owner_id = ?",
-                (invoice_id, _OWNER_ID),
+                (invoice_id, owner_id),
             ).fetchone()
         if row is None:
             raise RuntimeError("Invoice was not found while saving the verified capture.")
@@ -189,6 +280,11 @@ class Database:
         with self._lock:
             self._connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    owner_id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS invoices (
                     id TEXT PRIMARY KEY,
                     owner_id TEXT NOT NULL,
@@ -214,6 +310,14 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS invoices_owner_created
                     ON invoices (owner_id, created_at DESC);
+                CREATE TABLE IF NOT EXISTS invoice_idempotency (
+                    owner_id TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    invoice_id TEXT NOT NULL UNIQUE,
+                    PRIMARY KEY (owner_id, idempotency_key),
+                    FOREIGN KEY (invoice_id) REFERENCES invoices (id)
+                );
                 """
             )
 

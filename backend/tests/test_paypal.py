@@ -204,3 +204,30 @@ async def test_missing_credentials_fail_before_any_external_request() -> None:
     await service.close()
 
     assert request_count == 0
+
+
+@pytest.mark.anyio
+async def test_paypal_client_does_not_retry_non_transient_order_errors() -> None:
+    create_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal create_calls
+        if request.url.path == "/v1/oauth2/token":
+            return httpx.Response(200, json={"access_token": "synthetic-token", "expires_in": 3600})
+        create_calls += 1
+        return httpx.Response(422, json={"name": "UNPROCESSABLE_ENTITY"})
+
+    service = _service(httpx.MockTransport(handler))
+    with pytest.raises(PayPalServiceError, match="could not complete this request"):
+        try:
+            await service.create_order(
+                invoice_id="invoice-1",
+                description="Brand identity",
+                amount_cents=8450,
+                currency="USD",
+                request_id="stable-create-key",
+            )
+        finally:
+            await service.close()
+
+    assert create_calls == 1

@@ -8,11 +8,12 @@ explicitly confirms the details.
 
 ## Project status
 
-Stages 1–3 complete: responsive Flutter preview, FastAPI health service, and
-validated AI invoice-draft endpoint are implemented and tested. The PayPal
-Sandbox client is implemented and tested with synthetic responses, but the
-invoice workflow is not wired through it and no live Sandbox call has been
-made. The Flutter composer still saves local drafts.
+Stages 1–5 are implemented: a responsive Flutter preview, validated AI draft
+endpoint, owner-scoped SQLite persistence, and a PayPal Sandbox Orders workflow
+for approval, server-side capture, and status verification. Backend provider
+tests use synthetic responses; no live AI request or PayPal Sandbox payment has
+been made. The Flutter composer and dashboard are still preview/local-data UI
+and are not yet connected to these API routes.
 
 ## Repository layout
 
@@ -84,10 +85,29 @@ endpoint returns a clear configuration error; it does not fabricate a draft.
 The extraction request sends the invoice description to the configured AI
 provider.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the initial system diagram.
-Cash-flow summaries are based on verified records stored by the service. Setup,
-sandbox walkthrough, deployment, and submission materials will be completed in
-later stages.
+The current backend workflow is:
+
+1. `POST /api/session` creates a private anonymous session. Send its bearer
+   token to the authenticated routes; only a hash of the token is stored.
+2. `POST /api/ai/draft` analyzes an invoice description when an AI key is
+   configured.
+3. After review, `POST /api/invoices` saves the exact details. Include an
+   `Idempotency-Key` header so a retried save cannot create a duplicate.
+4. Only after the user confirms the displayed amount, call
+   `POST /api/invoices/{id}/checkout` with
+   `{"confirmed":true,"amount_cents":8450,"currency":"USD"}` (using the
+   reviewed invoice values); the API rejects missing or mismatched
+   confirmations. Open the returned `approval_url` for PayPal Sandbox approval.
+5. After approval, call `POST /api/invoices/{id}/capture`. The backend fetches
+   and validates the PayPal order and capture amount/currency before it marks
+   the invoice paid. Client-provided success statuses are ignored.
+6. Use `GET /api/invoices` or `GET /api/invoices/{id}` to read persisted status.
+
+PayPal order creation, capture, and invoice saves have stable idempotency
+protection. The backend currently uses polling during capture/refresh; PayPal
+webhooks, AI cash-flow summaries/chat, and full Flutter-to-API wiring remain
+future work. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system
+diagram.
 
 ## Security
 

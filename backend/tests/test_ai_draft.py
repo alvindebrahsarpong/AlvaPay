@@ -5,7 +5,8 @@ import httpx
 import pytest
 
 from app.ai import AIConfigurationError, AIProviderError, InvoiceDraftService
-from app.main import app, get_invoice_draft_service
+from app.database import Database
+from app.main import app, get_database, get_invoice_draft_service
 
 _VALID_DRAFT = {
     "customer_name": "Ada Studio",
@@ -85,6 +86,9 @@ async def test_parse_endpoint_validates_input_and_returns_draft() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return _anthropic_response(_VALID_DRAFT)
 
+    database = Database(":memory:")
+    token = database.create_session()
+    app.dependency_overrides[get_database] = lambda: database
     app.dependency_overrides[get_invoice_draft_service] = lambda: InvoiceDraftService(
         api_key="synthetic-test-key",
         transport=httpx.MockTransport(handler),
@@ -97,10 +101,16 @@ async def test_parse_endpoint_validates_input_and_returns_draft() -> None:
             response = await client.post(
                 "/api/ai/draft",
                 json={"text": "Invoice Ada 84.50 USD for brand identity."},
+                headers={"Authorization": f"Bearer {token}"},
             )
-            invalid = await client.post("/api/ai/draft", json={"text": "short"})
+            invalid = await client.post(
+                "/api/ai/draft",
+                json={"text": "short"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
     finally:
         app.dependency_overrides.clear()
+        database.close()
 
     assert response.status_code == 200
     assert response.json() == _VALID_DRAFT
@@ -109,6 +119,9 @@ async def test_parse_endpoint_validates_input_and_returns_draft() -> None:
 
 @pytest.mark.anyio
 async def test_parse_endpoint_reports_missing_ai_key_without_fallback() -> None:
+    database = Database(":memory:")
+    token = database.create_session()
+    app.dependency_overrides[get_database] = lambda: database
     app.dependency_overrides[get_invoice_draft_service] = lambda: InvoiceDraftService(api_key="")
     try:
         async with httpx.AsyncClient(
@@ -118,9 +131,11 @@ async def test_parse_endpoint_reports_missing_ai_key_without_fallback() -> None:
             response = await client.post(
                 "/api/ai/draft",
                 json={"text": "Invoice Ada 84.50 USD for brand identity."},
+                headers={"Authorization": f"Bearer {token}"},
             )
     finally:
         app.dependency_overrides.clear()
+        database.close()
 
     assert response.status_code == 503
     assert response.json()["detail"].startswith("AI drafting is not configured")

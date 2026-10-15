@@ -1,6 +1,6 @@
 import re
 from datetime import date
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -62,6 +62,14 @@ class InvoiceCreateRequest(InvoiceDraft):
     customer_email: str = Field(min_length=3, max_length=254)
     amount_cents: int = Field(strict=True, gt=0, le=100_000_000)
     currency: str
+
+
+class CheckoutConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    confirmed: Literal[True]
+    amount_cents: int = Field(strict=True, gt=0, le=100_000_000)
+    currency: str = Field(pattern=r"^(USD|EUR|GBP|CAD)$")
 
 
 class InvoiceOut(BaseModel):
