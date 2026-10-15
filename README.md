@@ -9,9 +9,10 @@ explicitly confirms the details.
 ## Project status
 
 Stages 1–3 complete: responsive Flutter preview, FastAPI health service, and
-validated AI invoice-draft endpoint are implemented and tested. The Flutter
-composer still saves local drafts; app-to-API wiring and PayPal checkout remain
-incomplete.
+validated AI invoice-draft endpoint are implemented and tested. The PayPal
+Sandbox client is implemented and tested with synthetic responses, but the
+invoice workflow is not wired through it and no live Sandbox call has been
+made. The Flutter composer still saves local drafts.
 
 ## Repository layout
 

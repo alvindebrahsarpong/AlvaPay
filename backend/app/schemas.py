@@ -55,3 +55,27 @@ class InvoiceDraft(BaseModel):
             if parsed.isoformat() != value:
                 raise ValueError("Due date must use YYYY-MM-DD format.")
         return value
+
+
+class InvoiceCreateRequest(InvoiceDraft):
+    customer_name: str = Field(min_length=1, max_length=120)
+    customer_email: str = Field(min_length=3, max_length=254)
+    amount_cents: int = Field(strict=True, gt=0, le=100_000_000)
+    currency: str
+
+
+class InvoiceOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    customer_name: str
+    customer_email: str
+    service_description: str
+    amount_cents: int
+    currency: str
+    due_date: str | None
+    status: str
+    paypal_order_id: str | None
+    approval_url: str | None
+    paypal_capture_id: str | None
+    created_at: str
