@@ -13,8 +13,8 @@ draft, persistence, and PayPal Sandbox checkout workflow. Users can review an
 AI-assisted draft, save it to SQLite, explicitly confirm its exact amount, open
 PayPal Sandbox, then ask the backend to capture and verify the order. Tests use
 synthetic provider responses; no live AI request or PayPal Sandbox payment has
-been made. Cash-flow chat, production deployment, and submission materials
-remain future work.
+been made. The app is not yet deployed, and cash-flow chat, payment webhooks,
+and receipt-photo extraction are not implemented.
 
 ## Repository layout
 
@@ -35,21 +35,23 @@ alvapay/
 
 ## Run locally
 
-1. Copy `.env.example` to `backend/.env` and fill in credentials when ready.
-   The Flutter app must never contain backend or provider secrets.
+1. Copy `.env.example` to `backend/.env` once, then add credentials to that
+   local file when ready. Do not repeat the copy after adding credentials. The
+   Flutter app must never contain backend or provider secrets.
 2. Install and run the API:
 
    ```powershell
+   Copy-Item .env.example backend/.env
    Set-Location backend
    py -m venv .venv
    .\.venv\Scripts\Activate.ps1
    py -m pip install -e ".[dev]"
-   Copy-Item ..\.env.example .env
    py -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
 
    The API listens on `http://localhost:8000`; check
-   `http://localhost:8000/api/health`.
+   `http://localhost:8000/api/health`. Interactive API documentation is at
+   `http://localhost:8000/docs`.
 3. In another terminal, run the Flutter app:
 
    ```powershell
@@ -94,10 +96,14 @@ server-side verification with PayPal.
 The backend's `POST /api/ai/draft` endpoint uses Anthropic's Messages API with
 JSON Schema structured output and validates the returned draft again with
 Pydantic. The default model is `claude-sonnet-5-5`; set `AI_MODEL` to an
-available model and `AI_API_KEY` in `backend/.env`. If the key is missing, the
+available Anthropic model and `AI_API_KEY` (or `ANTHROPIC_API_KEY`) in
+`backend/.env`. The model identifier is listed in the
+[official Anthropic model overview](https://platform.claude.com/docs/en/models/overview).
+Anthropic is the only implemented provider; `AI_PROVIDER` is validated rather
+than silently falling back to another service. If the key is missing, the
 endpoint returns a clear configuration error; it does not fabricate a draft.
-The extraction request sends the invoice description to the configured AI
-provider.
+The extraction request sends the invoice description to Anthropic. Receipt
+images are not currently accepted.
 
 The current backend workflow is:
 
@@ -118,17 +124,89 @@ The current backend workflow is:
 6. Use `GET /api/invoices` or `GET /api/invoices/{id}` to read persisted status.
 
 PayPal order creation, capture, and invoice saves have stable idempotency
-protection. The backend currently uses polling during capture/refresh; PayPal
-webhooks, and AI cash-flow summaries/chat remain future work. The Flutter app
-is wired to the draft, invoice, checkout, capture, and refresh routes, and keeps
-the session token out of source control. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-for the system diagram.
+protection. The app returns to AlvaPay after Sandbox approval; the user must
+explicitly choose **Verify payment** to ask the backend to capture and verify
+the approved order. The backend currently uses polling during refresh; PayPal
+webhooks, reminders, and AI cash-flow summaries/chat remain future work. The
+Flutter app is wired to the draft, invoice, checkout, capture, and refresh
+routes, and stores the anonymous session token in platform secure storage.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system diagram.
 
 Without provider credentials, the backend deliberately returns a clear
 configuration error for AI drafting or PayPal checkout; the app does not
 substitute sample AI or payment results. Add sandbox credentials only to
 `backend/.env` using [.env.example](.env.example) as a guide. Do not put them in
 Flutter build defines or paste them into source files.
+
+## Environment variables
+
+| Variable | Purpose | Default / requirement |
+| --- | --- | --- |
+| `DATABASE_PATH` | SQLite database location | `./data/alvapay.sqlite3` |
+| `CORS_ORIGINS` | Comma-separated exact browser origins | `http://localhost:8080` |
+| `PAYPAL_ENV` | Payment environment | `sandbox` only |
+| `PAYPAL_CLIENT_ID` | PayPal Sandbox REST app client ID | Required for checkout |
+| `PAYPAL_CLIENT_SECRET` | PayPal Sandbox REST app secret | Required for checkout |
+| `APP_RETURN_URL` | Return and cancel URL for approved checkout | `http://localhost:8080/` |
+| `AI_PROVIDER` | AI integration | `anthropic` (only implemented provider) |
+| `AI_MODEL` | Anthropic model ID | `claude-sonnet-5-5` |
+| `AI_API_KEY` or `ANTHROPIC_API_KEY` | Anthropic API key | Required for AI drafting |
+
+Create Sandbox REST credentials and a separate buyer test account in the
+[PayPal Developer Dashboard](https://developer.paypal.com/tools/sandbox/).
+Never use real customer data or production PayPal credentials for this demo.
+
+## Deployment
+
+The API can be deployed to a Python ASGI host and the Flutter Web build to any
+HTTPS static-file host. Keep the SQLite file on a persistent disk and run a
+single backend instance; this MVP does not configure PostgreSQL or shared
+database access.
+
+For a Render Python web service (see Render's
+[FastAPI guide](https://render.com/docs/deploy-fastapi),
+[web-service guide](https://render.com/docs/web-services), and
+[persistent-disk guide](https://render.com/docs/disks)):
+
+1. Set the service root directory to `backend`, install with
+   `pip install -e .`, and start with
+   `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+2. Attach a persistent disk mounted at `/var/data`, then set
+   `DATABASE_PATH=/var/data/alvapay.sqlite3`.
+3. Configure `CORS_ORIGINS` to the exact HTTPS origin of the deployed Flutter
+   site (no path or trailing slash), and set `APP_RETURN_URL` to that site's
+   URL. Add the PayPal Sandbox and Anthropic credentials in the host's secret
+   environment settings, not in the repository.
+4. Build the web client for the deployed API and publish `app/build/web` using
+   a static host:
+
+   ```powershell
+   Set-Location app
+   flutter build web --release --dart-define=API_BASE_URL=https://<your-api-host>
+   ```
+
+   Use the static site's HTTPS URL in `CORS_ORIGINS` and
+   `APP_RETURN_URL`. `API_BASE_URL` is compiled into the public client, so it
+   must never contain a credential. Rebuild the client after changing it.
+5. Verify `/api/health`, create a private session, and complete a payment only
+   with a Sandbox buyer account. The user returns to AlvaPay and selects
+   **Verify payment**; payment is not inferred from the redirect.
+
+Render persistent disks require a paid web-service plan. Without a persistent
+disk, the SQLite file is lost on restart or redeploy; do not host this MVP on
+an ephemeral filesystem if invoice persistence is expected. The instructions
+above describe deployment configuration, not a deployed or live-provider-
+tested service. Confirm persistent-disk behavior and provider configuration
+on the chosen host before sharing a public demo.
+
+## Demo and submission
+
+- [Timed demo script](docs/DEMO_SCRIPT.md)
+- [Submission description and implementation notes](docs/SUBMISSION.md)
+
+The live payment portion requires working Sandbox credentials and a Sandbox
+buyer account. Until those are configured, demo the user interface with the
+automated synthetic tests; do not claim a successful provider payment.
 
 ## Security
 
