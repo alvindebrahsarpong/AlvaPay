@@ -10,6 +10,8 @@ node_modules/
 backend/dist/
 backend/coverage/
 backend/data/
+backend/.venv/
+backend/*.egg-info/
 
 # Flutter and Dart
 .dart_tool/

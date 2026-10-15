@@ -2,20 +2,20 @@
 
 **Split smart. Settle softly.**
 
-AlvaPay turns a shared expense into a fair, reviewable split, then creates and
-tracks PayPal Sandbox invoices after the user explicitly confirms each amount.
+AlvaPay helps freelancers turn a plain-language brief into a reviewable invoice
+draft, then creates and captures PayPal Sandbox orders only after the user
+explicitly confirms the details.
 
 ## Project status
 
-Milestone 1 complete: monorepo scaffold, backend health service, Flutter app
-location, and project documentation.
+Stage 1 complete: Flutter scaffold and FastAPI health endpoint verified.
 
 ## Repository layout
 
 ```text
 alvapay/
 |-- app/             Flutter app (Web and Android)
-|-- backend/         Node.js, Express, TypeScript API
+|-- backend/         Python, FastAPI API and tests
 |-- docs/            Architecture and demo materials
 |-- .env.example     Backend configuration template (no credentials)
 |-- LICENSE          MIT
@@ -25,9 +25,7 @@ alvapay/
 ## Prerequisites
 
 - Flutter stable with Dart SDK constraints satisfied by `app/pubspec.yaml`.
-- Node.js 20.19 or later and npm. **Node.js 20 reached end of life on March 24,
-  2026.** This project keeps compatibility with Node 20 per the hackathon
-  specification; use a currently supported LTS release for deployment.
+- Python 3.12 or later and `pip`.
 
 ## Run locally
 
@@ -37,26 +35,29 @@ alvapay/
 
    ```powershell
    Set-Location backend
-   npm install
-   npm run dev
+   py -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   py -m pip install -e ".[dev]"
+   Copy-Item ..\.env.example .env
+   py -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
    ```
 
-   The API listens on `http://localhost:3000`; check
-   `http://localhost:3000/api/health`.
+   The API listens on `http://localhost:8000`; check
+   `http://localhost:8000/api/health`.
 3. In another terminal, run the Flutter app:
 
    ```powershell
    Set-Location app
    flutter pub get
-   flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:3000
+   flutter run -d chrome --web-port 8080 --dart-define=API_BASE_URL=http://localhost:8000
    ```
 
 ## Build and test
 
 ```powershell
 Set-Location backend
-npm test
-npm run build
+py -m pytest
+ruff check .
 
 Set-Location ..\app
 flutter analyze
@@ -66,19 +67,19 @@ flutter build web
 
 ## Product and architecture
 
-AlvaPay uses an AI provider to prepare a structured draft from expense text or
-a receipt. People can review and edit the split before an explicit confirmation
-creates invoices in the PayPal Sandbox. The service records payment status,
-supports reminders, and answers questions about saved plans. No invoice is sent
-before user confirmation.
+AlvaPay uses an AI provider to prepare a structured invoice draft from natural
+language. People can review and edit the draft before explicit confirmation
+creates a PayPal Sandbox checkout order. Payment status is only updated after
+server-side verification with PayPal.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the initial system diagram.
-Setup, sandbox walkthrough, deployment, and submission materials will be
-completed in later milestones.
+Cash-flow summaries are based on verified records stored by the service. Setup,
+sandbox walkthrough, deployment, and submission materials will be completed in
+later stages.
 
 ## Security
 
-Keep all PayPal and LLM credentials in backend environment variables. Never
+Keep all PayPal and AI credentials in backend environment variables. Never
 commit `.env` files, database files, access tokens, or real customer data.
 PayPal integrations are sandbox-only for this project.
 
