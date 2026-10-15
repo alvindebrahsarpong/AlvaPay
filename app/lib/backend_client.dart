@@ -255,18 +255,31 @@ class AlvaPayApi implements AlvaPayBackend {
   }
 
   @override
-  Future<void> register(String email, String password) =>
-      _authenticate('/api/auth/register', email, password);
+  Future<void> register(String email, String password) => _authenticate(
+    '/api/auth/register',
+    email,
+    password,
+    includeCurrentSession: true,
+  );
 
   @override
-  Future<void> login(String email, String password) =>
-      _authenticate('/api/auth/login', email, password);
+  Future<void> login(String email, String password) => _authenticate(
+    '/api/auth/login',
+    email,
+    password,
+    includeCurrentSession: true,
+  );
 
-  Future<void> _authenticate(String path, String email, String password) async {
+  Future<void> _authenticate(
+    String path,
+    String email,
+    String password, {
+    bool includeCurrentSession = false,
+  }) async {
     final response = await _send(
       'POST',
       path,
-      authenticated: false,
+      authenticated: includeCurrentSession,
       body: {'email': email, 'password': password},
     );
     if (response is! Map<String, dynamic> ||

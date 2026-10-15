@@ -38,11 +38,15 @@ void main() {
       tokenStore: tokenStore,
       client: MockClient((request) async {
         requests.add(request);
+        if (request.url.path == '/api/session') {
+          return http.Response('{"token":"guest-session"}', 201);
+        }
         if (request.url.path == '/api/auth/register') {
           expect(jsonDecode(request.body), {
             'email': 'user@example.test',
             'password': 'synthetic-test-passphrase',
           });
+          expect(request.headers['Authorization'], 'Bearer guest-session');
           return http.Response(
             '{"token":"account-session","email":"user@example.test"}',
             201,
@@ -64,6 +68,7 @@ void main() {
       expect(tokenStore.token, isNull);
       expect(tokenStore.email, isNull);
       expect(requests.map((request) => request.url.path), [
+        '/api/session',
         '/api/auth/register',
         '/api/auth/logout',
       ]);

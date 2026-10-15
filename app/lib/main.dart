@@ -707,7 +707,7 @@ class _AccountDialogState extends State<AccountDialog> {
             Text(email, style: const TextStyle(fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
             const Text(
-              'Your invoices are private to this account.',
+              'Invoices for this account appear on your signed-in devices.',
               style: TextStyle(height: 1.5),
             ),
             if (_error case final error?) ...[
@@ -746,8 +746,8 @@ class _AccountDialogState extends State<AccountDialog> {
               children: [
                 Text(
                   _creatingAccount
-                      ? 'Create a private workspace for your invoices.'
-                      : 'Sign in to your private invoice workspace.',
+                      ? 'Create one account for your invoices across devices.'
+                      : 'Sign in to see this account’s invoices on this device.',
                   style: const TextStyle(height: 1.5),
                 ),
                 const SizedBox(height: 18),

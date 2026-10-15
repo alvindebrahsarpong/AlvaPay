@@ -62,17 +62,26 @@ alvapay/
    flutter run -d chrome --web-port 8080 --dart-define=API_BASE_URL=http://localhost:8000
    ```
 
-   The app stores its private anonymous session token using platform secure
-   storage. For a local Android emulator, the default API address is
-   `http://10.0.2.2:8000`; run the backend on the host and launch:
+   The app stores its private session token using platform secure storage. To
+   see the same invoices in a browser and on Android, sign in with the same
+   account on both. Creating an account or signing in moves invoices from the
+   current anonymous browser/app session into that account. Accounts may be
+   signed in on multiple devices, and signing out revokes only that device's
+   session.
+
+   For an Android emulator, the default API address is `http://10.0.2.2:8000`.
+   For a physical Android device connected over USB, forward the backend port
+   and use the forwarded loopback URL:
 
    ```powershell
-   flutter run -d <emulator-id> --dart-define=API_BASE_URL=http://10.0.2.2:8000
+   adb reverse tcp:8000 tcp:8000
+   flutter run -d <phone-id> --dart-define=API_BASE_URL=http://127.0.0.1:8000
    ```
 
-   Debug builds permit local cleartext HTTP for emulator development only.
-   Use an HTTPS backend URL for hosted Web builds and production Android
-   releases. `API_BASE_URL` is a public endpoint, not a secret.
+   Keep `adb reverse` active while using the locally hosted backend. Debug
+   builds permit local cleartext HTTP for development only. Use an HTTPS
+   backend URL for hosted Web builds and production Android releases.
+   `API_BASE_URL` is a public endpoint, not a secret.
 
 ## Build and test
 
@@ -113,9 +122,11 @@ The current backend workflow is:
    workspace, use `POST /api/auth/register` or `POST /api/auth/login` with an
    email and password (minimum 12 characters). Passwords are stored as
    PBKDF2-SHA256 hashes, session tokens are stored as hashes, and
-   `POST /api/auth/logout` revokes the current bearer token. Each account has
-   one active session; a new login replaces its previous session. Email
-   verification and password recovery are not included in this MVP.
+   the current anonymous workspace's invoices are claimed by the account.
+   `POST /api/auth/logout` revokes only the current bearer token. An account
+   can have multiple active sessions, so signing in on one device does not
+   sign out another. Email verification and password recovery are not
+   included in this MVP.
 2. Send the returned bearer token to authenticated routes.
    `POST /api/ai/draft` analyzes an invoice description when an AI key is
    configured.
@@ -143,8 +154,10 @@ webhooks, reminders, and conversational cash-flow chat remain future work.
 The summary endpoint filters verified payment totals on the server before
 sending currency-grouped aggregates (without invoice/customer details) to AI.
 The Flutter app is wired to the draft, summary, invoice, checkout, capture,
-and refresh routes, and stores the anonymous session token in platform secure
-storage.
+and refresh routes, and stores its session token in platform secure storage.
+Anonymous sessions are private per browser/app installation; registering or
+signing in moves that installation's invoices to the signed-in account so
+they can be accessed from other signed-in devices.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system diagram.
 
 Without provider credentials, the backend deliberately returns a clear

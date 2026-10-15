@@ -15,6 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.ai import AIConfigurationError, AIProviderError, InvoiceDraftService
 from app.database import (
     AccountAlreadyExistsError,
+    AccountSessionConflictError,
     Database,
     IdempotencyConflictError,
 )
@@ -98,10 +99,29 @@ def create_session(
 def register_account(
     request: AccountCredentials,
     database: Annotated[Database, Depends(get_database)],
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Depends(_bearer),
+    ],
 ) -> AuthSessionOut:
+    guest_owner_id = None
+    if credentials is not None:
+        guest_owner_id = database.owner_for_token(credentials.credentials)
+        if guest_owner_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="This AlvaPay session is no longer valid.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     try:
-        owner_id = database.create_account(request.email, request.password)
+        owner_id = database.create_account(
+            request.email,
+            request.password,
+            guest_owner_id=guest_owner_id,
+        )
     except AccountAlreadyExistsError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except AccountSessionConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return AuthSessionOut(
         token=database.create_session(owner_id),
@@ -113,10 +133,28 @@ def register_account(
 def login_account(
     request: AccountCredentials,
     database: Annotated[Database, Depends(get_database)],
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Depends(_bearer),
+    ],
 ) -> AuthSessionOut:
+    guest_owner_id = None
+    if credentials is not None:
+        guest_owner_id = database.owner_for_token(credentials.credentials)
+        if guest_owner_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="This AlvaPay session is no longer valid.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     owner_id = database.authenticate_account(request.email, request.password)
     if owner_id is None:
         raise HTTPException(status_code=401, detail="Email or password is incorrect.")
+    try:
+        if guest_owner_id is not None:
+            database.attach_guest_workspace(guest_owner_id, owner_id)
+    except AccountSessionConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return AuthSessionOut(
         token=database.create_session(owner_id),
         email=request.email,

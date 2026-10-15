@@ -23,7 +23,8 @@ and must not mistake a browser redirect for a completed payment.
    grouped counts and totals (not customer or invoice details) to Claude.
 4. The user reviews and edits the details, then saves the invoice to
    account-scoped SQLite storage. Email/password registration and sign-in use
-   backend-hashed passwords; signing out revokes the active session.
+   backend-hashed passwords; anonymous invoices on that device are moved into
+   the account when the user registers or signs in.
 5. The user explicitly confirms the exact amount and currency.
 6. The backend creates a PayPal Sandbox Checkout Orders v2 order and returns
    only its verified Sandbox approval link to the Flutter client.
@@ -65,9 +66,11 @@ payment.
 - No provider secrets are included in Flutter or source control.
 - Session bearer tokens are stored as hashes by the backend and in platform
   secure storage by the app.
-- Passwords use PBKDF2-SHA256 hashes. Each account has one active session;
-  password recovery and email verification are not included in this MVP.
-- Invoice records are scoped to the session that created them.
+- Passwords use PBKDF2-SHA256 hashes. Accounts support multiple simultaneous
+  device sessions; logout revokes only the current session. Password recovery
+  and email verification are not included in this MVP.
+- Authenticated invoices are shared by the account across devices; anonymous
+  sessions remain private to their browser or app installation until sign-in.
 - Checkout requires an explicit user action and matching amount/currency.
 - Payment status is not trusted from the app or from a success redirect.
 - Demo data should be synthetic; only PayPal Sandbox credentials and buyer

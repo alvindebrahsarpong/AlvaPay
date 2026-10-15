@@ -1,3 +1,6 @@
+import hashlib
+import sqlite3
+
 import pytest
 
 from app.database import Database, IdempotencyConflictError
@@ -29,6 +32,85 @@ def test_sessions_are_random_and_stored_as_hashes() -> None:
             row["token_hash"]
             for row in database._connection.execute("SELECT token_hash FROM sessions").fetchall()
         }
+    finally:
+        database.close()
+
+
+def test_account_sessions_can_be_active_on_multiple_devices() -> None:
+    database = Database(":memory:")
+    try:
+        owner_id = database.create_account(
+            "user@example.test",
+            "correct-horse-battery",
+        )
+        browser_token = database.create_session(owner_id)
+        mobile_token = database.create_session(owner_id)
+
+        assert browser_token != mobile_token
+        assert database.owner_for_token(browser_token) == owner_id
+        assert database.owner_for_token(mobile_token) == owner_id
+    finally:
+        database.close()
+
+
+def test_account_creation_claims_guest_invoices_and_idempotency() -> None:
+    database = Database(":memory:")
+    try:
+        guest_token = database.create_session()
+        guest_owner_id = database.owner_for_token(guest_token)
+        assert guest_owner_id is not None
+        invoice = database.create_invoice(
+            _invoice_request(),
+            owner_id=guest_owner_id,
+            idempotency_key="guest-invoice-0001",
+        )
+
+        account_owner_id = database.create_account(
+            "user@example.test",
+            "correct-horse-battery",
+            guest_owner_id=guest_owner_id,
+        )
+        account_token = database.create_session(account_owner_id)
+
+        assert database.owner_for_token(guest_token) is None
+        assert database.owner_for_token(account_token) == account_owner_id
+        assert database.list_invoices(owner_id=account_owner_id) == [invoice]
+        assert database.create_invoice(
+            _invoice_request(),
+            owner_id=account_owner_id,
+            idempotency_key="guest-invoice-0001",
+        ) == invoice
+    finally:
+        database.close()
+
+
+def test_legacy_single_session_table_migrates_without_revoking_session(tmp_path) -> None:
+    path = tmp_path / "legacy-alvapay.sqlite3"
+    legacy_token = "legacy-session-token"
+    legacy_token_hash = hashlib.sha256(legacy_token.encode("utf-8")).hexdigest()
+    legacy = sqlite3.connect(path)
+    legacy.execute(
+        """
+        CREATE TABLE sessions (
+            owner_id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    legacy.execute(
+        "INSERT INTO sessions (owner_id, token_hash, created_at) VALUES (?, ?, ?)",
+        ("account-owner", legacy_token_hash, "2026-10-15T00:00:00+00:00"),
+    )
+    legacy.commit()
+    legacy.close()
+
+    database = Database(path)
+    try:
+        second_token = database.create_session("account-owner")
+
+        assert database.owner_for_token(legacy_token) == "account-owner"
+        assert database.owner_for_token(second_token) == "account-owner"
     finally:
         database.close()
 

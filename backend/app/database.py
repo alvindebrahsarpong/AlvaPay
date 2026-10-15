@@ -22,6 +22,10 @@ class AccountAlreadyExistsError(Exception):
     pass
 
 
+class AccountSessionConflictError(Exception):
+    pass
+
+
 _PASSWORD_ITERATIONS = 310_000
 
 
@@ -78,7 +82,13 @@ class Database:
         with self._lock:
             self._connection.close()
 
-    def create_account(self, email: str, password: str) -> str:
+    def create_account(
+        self,
+        email: str,
+        password: str,
+        *,
+        guest_owner_id: str | None = None,
+    ) -> str:
         owner_id = str(uuid4())
         password_hash = _hash_password(password)
         with self._transaction() as connection:
@@ -88,6 +98,13 @@ class Database:
             ).fetchone()
             if existing is not None:
                 raise AccountAlreadyExistsError("An account with this email already exists.")
+            if guest_owner_id is not None and connection.execute(
+                "SELECT 1 FROM accounts WHERE owner_id = ?",
+                (guest_owner_id,),
+            ).fetchone() is not None:
+                raise AccountSessionConflictError(
+                    "This session already belongs to an account. Sign in instead."
+                )
             connection.execute(
                 """
                 INSERT INTO accounts (owner_id, email, password_hash, created_at)
@@ -95,6 +112,8 @@ class Database:
                 """,
                 (owner_id, email, password_hash, _now()),
             )
+            if guest_owner_id is not None:
+                self._move_guest_workspace(connection, guest_owner_id, owner_id)
         return owner_id
 
     def authenticate_account(self, email: str, password: str) -> str | None:
@@ -116,12 +135,15 @@ class Database:
             ).fetchone()
         return str(row["email"]) if row is not None else None
 
+    def attach_guest_workspace(self, guest_owner_id: str, account_owner_id: str) -> None:
+        with self._transaction() as connection:
+            self._move_guest_workspace(connection, guest_owner_id, account_owner_id)
+
     def create_session(self, owner_id: str | None = None) -> str:
         owner_id = owner_id or str(uuid4())
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         with self._transaction() as connection:
-            connection.execute("DELETE FROM sessions WHERE owner_id = ?", (owner_id,))
             connection.execute(
                 "INSERT INTO sessions (owner_id, token_hash, created_at) VALUES (?, ?, ?)",
                 (owner_id, token_hash, _now()),
@@ -397,8 +419,8 @@ class Database:
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
-                    owner_id TEXT PRIMARY KEY,
-                    token_hash TEXT NOT NULL UNIQUE,
+                    owner_id TEXT NOT NULL,
+                    token_hash TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS invoices (
@@ -436,6 +458,67 @@ class Database:
                 );
                 """
             )
+            session_columns = self._connection.execute(
+                "PRAGMA table_info(sessions)"
+            ).fetchall()
+            owner_id_is_primary_key = any(
+                column["name"] == "owner_id" and column["pk"] == 1
+                for column in session_columns
+            )
+            if owner_id_is_primary_key:
+                with self._transaction() as connection:
+                    connection.execute(
+                        """
+                        CREATE TABLE sessions_multi (
+                            owner_id TEXT NOT NULL,
+                            token_hash TEXT PRIMARY KEY,
+                            created_at TEXT NOT NULL
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO sessions_multi (owner_id, token_hash, created_at)
+                        SELECT owner_id, token_hash, created_at FROM sessions
+                        """
+                    )
+                    connection.execute("DROP TABLE sessions")
+                    connection.execute(
+                        "ALTER TABLE sessions_multi RENAME TO sessions"
+                    )
+
+    @staticmethod
+    def _move_guest_workspace(
+        connection: sqlite3.Connection,
+        guest_owner_id: str,
+        account_owner_id: str,
+    ) -> None:
+        if guest_owner_id == account_owner_id:
+            return
+        if connection.execute(
+            "SELECT 1 FROM accounts WHERE owner_id = ?",
+            (guest_owner_id,),
+        ).fetchone() is not None:
+            raise AccountSessionConflictError(
+                "This session already belongs to an account. Sign in instead."
+            )
+        if connection.execute(
+            "SELECT 1 FROM accounts WHERE owner_id = ?",
+            (account_owner_id,),
+        ).fetchone() is None:
+            raise RuntimeError("The target account does not exist.")
+        connection.execute(
+            "UPDATE invoices SET owner_id = ? WHERE owner_id = ?",
+            (account_owner_id, guest_owner_id),
+        )
+        connection.execute(
+            "UPDATE invoice_idempotency SET owner_id = ? WHERE owner_id = ?",
+            (account_owner_id, guest_owner_id),
+        )
+        connection.execute(
+            "DELETE FROM sessions WHERE owner_id = ?",
+            (guest_owner_id,),
+        )
 
 
 def _public_invoice(row: sqlite3.Row) -> dict[str, object]:
