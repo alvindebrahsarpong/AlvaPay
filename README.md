@@ -69,18 +69,20 @@ alvapay/
    signed in on multiple devices, and signing out revokes only that device's
    session.
 
-   For an Android emulator, the default API address is `http://10.0.2.2:8000`.
    For a physical Android device connected over USB, forward the backend port
-   and use the forwarded loopback URL:
+   and run the app; its default API address is the forwarded loopback URL,
+   `http://127.0.0.1:8000`:
 
    ```powershell
    adb reverse tcp:8000 tcp:8000
-   flutter run -d <phone-id> --dart-define=API_BASE_URL=http://127.0.0.1:8000
+   flutter run -d <phone-id>
    ```
 
    Keep `adb reverse` active while using the locally hosted backend. Debug
    builds permit local cleartext HTTP for development only. Use an HTTPS
-   backend URL for hosted Web builds and production Android releases.
+   backend URL for hosted Web builds and production Android releases. Android
+   emulators use `http://10.0.2.2:8000`; override the default with
+   `--dart-define=API_BASE_URL=http://10.0.2.2:8000` when running on an emulator.
    `API_BASE_URL` is a public endpoint, not a secret.
 
 ## Build and test

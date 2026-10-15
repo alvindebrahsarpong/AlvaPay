@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:alvapay/backend_client.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -102,6 +103,30 @@ void main() {
       api.close();
     }
   });
+
+  test(
+    'uses the USB-reversed backend address for Android by default',
+    () async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      late Uri requestUri;
+      final api = AlvaPayApi(
+        tokenStore: _MemoryTokenStore(token: 'private-session'),
+        client: MockClient((request) async {
+          requestUri = request.url;
+          return http.Response('[]', 200);
+        }),
+      );
+
+      try {
+        expect(await api.listInvoices(), isEmpty);
+        expect(requestUri, Uri.parse('http://127.0.0.1:8000/api/invoices'));
+      } finally {
+        api.close();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    },
+  );
 
   test('requests cash-flow summary over the authenticated API', () async {
     late http.Request sentRequest;
