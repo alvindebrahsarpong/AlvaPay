@@ -8,7 +8,9 @@ explicitly confirms the details.
 
 ## Project status
 
-Stage 1 complete: Flutter scaffold and FastAPI health endpoint verified.
+Stages 1–2 complete: FastAPI health service and responsive Flutter preview
+verified. Invoice drafting currently saves only local drafts; AI and PayPal
+checkout are not connected yet.
 
 ## Repository layout
 

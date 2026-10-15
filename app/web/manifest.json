@@ -1,11 +1,11 @@
 {
-    "name": "alvapay",
-    "short_name": "alvapay",
+    "name": "AlvaPay",
+    "short_name": "AlvaPay",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#F5F5F0",
+    "theme_color": "#173B35",
+    "description": "Invoices and payments, with a little more peace of mind.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
