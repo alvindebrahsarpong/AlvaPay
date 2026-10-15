@@ -1,4 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'backend_client.dart';
 
 void main() {
   runApp(const AlvaPayApp());
@@ -13,62 +18,11 @@ const _forest = Color(0xFF173B35);
 const _mint = Color(0xFFD7E8D8);
 const _gold = Color(0xFFE6C990);
 
-enum InvoiceStatus { draft, awaiting, paid }
-
-class Invoice {
-  const Invoice({
-    required this.client,
-    required this.customerEmail,
-    required this.description,
-    required this.amountCents,
-    required this.dueDate,
-    required this.status,
-    required this.currency,
-  });
-
-  final String client;
-  final String customerEmail;
-  final String description;
-  final int amountCents;
-  final DateTime dueDate;
-  final InvoiceStatus status;
-  final String currency;
-
-  String get amount => '$currency ${(amountCents / 100).toStringAsFixed(2)}';
-}
-
-final _sampleInvoices = <Invoice>[
-  Invoice(
-    client: 'Morrow Studio',
-    customerEmail: 'accounts@morrow.example.test',
-    description: 'Brand identity · Phase II',
-    amountCents: 325000,
-    dueDate: DateTime(2026, 10, 24),
-    status: InvoiceStatus.awaiting,
-    currency: 'USD',
-  ),
-  Invoice(
-    client: 'Juniper Coffee',
-    customerEmail: 'billing@juniper.example.test',
-    description: 'October campaign',
-    amountCents: 118000,
-    dueDate: DateTime(2026, 10, 12),
-    status: InvoiceStatus.paid,
-    currency: 'USD',
-  ),
-  Invoice(
-    client: 'Atelier Thorne',
-    customerEmail: 'studio@atelierthorne.example.test',
-    description: 'Product photography',
-    amountCents: 78000,
-    dueDate: DateTime(2026, 10, 29),
-    status: InvoiceStatus.awaiting,
-    currency: 'USD',
-  ),
-];
-
 class AlvaPayApp extends StatefulWidget {
-  const AlvaPayApp({super.key});
+  const AlvaPayApp({super.key, this.backend, this.openApprovalUrl});
+
+  final AlvaPayBackend? backend;
+  final Future<bool> Function(Uri uri)? openApprovalUrl;
 
   @override
   State<AlvaPayApp> createState() => _AlvaPayAppState();
@@ -77,9 +31,94 @@ class AlvaPayApp extends StatefulWidget {
 class _AlvaPayAppState extends State<AlvaPayApp> {
   final _navigatorKey = GlobalKey<NavigatorState>();
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
+  late final AlvaPayBackend _backend;
+  late final bool _ownsBackend;
   ThemeMode _themeMode = ThemeMode.light;
   int _selectedIndex = 0;
-  final List<Invoice> _invoices = List.of(_sampleInvoices);
+  List<Invoice> _invoices = [];
+  final Set<String> _busyInvoices = {};
+  bool _loading = true;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _ownsBackend = widget.backend == null;
+    _backend = widget.backend ?? AlvaPayApi();
+    unawaited(_reloadInvoices());
+  }
+
+  @override
+  void dispose() {
+    if (_ownsBackend) _backend.close();
+    super.dispose();
+  }
+
+  Future<void> _reloadInvoices() async {
+    setState(() {
+      _loading = true;
+      _loadError = null;
+    });
+    try {
+      final invoices = await _backend.listInvoices();
+      if (!mounted) return;
+      setState(() {
+        _invoices = invoices;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      final message = _friendlyError(error);
+      setState(() {
+        _loadError = message;
+        _loading = false;
+      });
+      if (_invoices.isNotEmpty) _showMessage(message);
+    }
+  }
+
+  String _friendlyError(Object error) {
+    if (error is AlvaPayApiException) return error.message;
+    if (error is TimeoutException) {
+      return 'The request took too long. Check your connection and try again.';
+    }
+    if (error is FormatException) {
+      return 'AlvaPay received an invalid response. Refresh and try again.';
+    }
+    return 'AlvaPay could not reach the backend. Check its URL and try again.';
+  }
+
+  void _showMessage(String message) {
+    _messengerKey.currentState?.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _replaceInvoice(Invoice updated) {
+    setState(() {
+      _invoices = [
+        for (final invoice in _invoices)
+          if (invoice.id == updated.id) updated else invoice,
+      ];
+    });
+  }
+
+  Future<void> _runInvoiceAction(
+    Invoice invoice,
+    Future<Invoice> Function() action, {
+    required String successMessage,
+  }) async {
+    if (_busyInvoices.contains(invoice.id)) return;
+    setState(() => _busyInvoices.add(invoice.id));
+    try {
+      final updated = await action();
+      if (!mounted) return;
+      _replaceInvoice(updated);
+      _showMessage(successMessage);
+    } catch (error) {
+      if (mounted) _showMessage(_friendlyError(error));
+    } finally {
+      if (mounted) setState(() => _busyInvoices.remove(invoice.id));
+    }
+  }
 
   void _toggleTheme() {
     setState(() {
@@ -89,49 +128,156 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
     });
   }
 
-  void _openComposer() {
+  Future<void> _openComposer() async {
     final sheetContext = _navigatorKey.currentContext;
     if (sheetContext == null) return;
-    showModalBottomSheet<Invoice>(
+    final invoice = await showModalBottomSheet<Invoice>(
       context: sheetContext,
       isScrollControlled: true,
       useSafeArea: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => const InvoiceComposer(),
-    ).then((invoice) {
-      if (invoice == null || !mounted) return;
-      setState(() {
-        _invoices.insert(0, invoice);
-        _selectedIndex = 1;
-      });
-      _messengerKey.currentState?.showSnackBar(
-        const SnackBar(
-          content: Text('Draft saved. Review it before checkout.'),
-        ),
-      );
+      builder: (context) => InvoiceComposer(
+        analyzeInvoice: _backend.analyzeInvoice,
+        saveInvoice: (draft, key) =>
+            _backend.createInvoice(draft, idempotencyKey: key),
+      ),
+    );
+    if (invoice == null || !mounted) return;
+    setState(() {
+      _invoices = [invoice, ..._invoices];
+      _selectedIndex = 1;
     });
+    _showMessage('Draft saved. Review the exact total before checkout.');
+  }
+
+  Future<void> _reviewAndCheckout(Invoice invoice) async {
+    final context = _navigatorKey.currentContext;
+    if (context == null) return;
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => CheckoutConfirmationSheet(invoice: invoice),
+    );
+    if (confirmed != true || !mounted) return;
+    await _runInvoiceAction(
+      invoice,
+      () async {
+        final pending = await _backend.createCheckout(invoice);
+        _replaceInvoice(pending);
+        final rawUrl = pending.approvalUrl;
+        final uri = rawUrl == null ? null : Uri.tryParse(rawUrl);
+        if (uri == null || !_isSandboxApprovalUrl(uri)) {
+          throw const FormatException(
+            'AlvaPay did not return a valid Sandbox approval link.',
+          );
+        }
+        final opened = await (widget.openApprovalUrl ?? _openExternalUrl)(uri);
+        if (!opened) {
+          throw const AlvaPayApiException(
+            'The Sandbox checkout is ready, but this device could not open it. '
+            'Try opening PayPal again from the invoice.',
+          );
+        }
+        return pending;
+      },
+      successMessage: 'PayPal Sandbox opened. Return here after approval to verify payment.',
+    );
+  }
+
+  bool _isSandboxApprovalUrl(Uri uri) =>
+      uri.scheme == 'https' &&
+      (uri.host == 'www.sandbox.paypal.com' ||
+          uri.host == 'sandbox.paypal.com');
+
+  Future<bool> _openExternalUrl(Uri uri) =>
+      launchUrl(uri, mode: LaunchMode.externalApplication);
+
+  Future<void> _openApprovalUrl(Invoice invoice) async {
+    final rawUrl = invoice.approvalUrl;
+    final uri = rawUrl == null ? null : Uri.tryParse(rawUrl);
+    if (uri == null || !_isSandboxApprovalUrl(uri)) {
+      _showMessage('A valid Sandbox approval link is not available.');
+      return;
+    }
+    try {
+      final opened = await (widget.openApprovalUrl ?? _openExternalUrl)(uri);
+      if (!opened) _showMessage('Could not open PayPal Sandbox. Try again.');
+    } catch (error) {
+      _showMessage(_friendlyError(error));
+    }
+  }
+
+  Future<void> _verifyPayment(Invoice invoice) => _runInvoiceAction(
+    invoice,
+    () => _backend.captureInvoice(invoice),
+    successMessage: 'PayPal verified this payment.',
+  );
+
+  Future<void> _refreshInvoice(Invoice invoice) => _runInvoiceAction(
+    invoice,
+    () => _backend.refreshInvoice(invoice),
+    successMessage: 'Invoice status refreshed from PayPal.',
+  );
+
+  bool _isInvoiceBusy(Invoice invoice) => _busyInvoices.contains(invoice.id);
+
+  Widget _startupState() {
+    if (_loading) {
+      return const Center(
+        child: CircularProgressIndicator(semanticsLabel: 'Loading invoices'),
+      );
+    }
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cloud_off_outlined, size: 38, color: _muted),
+            const SizedBox(height: 14),
+            const Text(
+              'Your workspace is waiting',
+              style: TextStyle(fontSize: 19, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _loadError ?? 'Connect to the AlvaPay backend to load invoices.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: _muted),
+            ),
+            const SizedBox(height: 18),
+            OutlinedButton.icon(
+              onPressed: _reloadInvoices,
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('Retry connection'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    final isDark = _themeMode == ThemeMode.dark;
     final theme = ThemeData(
       useMaterial3: true,
-      scaffoldBackgroundColor: _canvas,
+      scaffoldBackgroundColor: isDark ? const Color(0xFF0B1220) : _canvas,
       colorScheme: ColorScheme.fromSeed(
         seedColor: _forest,
-        brightness: _themeMode == ThemeMode.dark
-            ? Brightness.dark
-            : Brightness.light,
-        surface: _themeMode == ThemeMode.dark
-            ? const Color(0xFF17211F)
-            : _paper,
+        brightness: isDark ? Brightness.dark : Brightness.light,
+        surface: isDark ? const Color(0xFF17211F) : _paper,
       ),
-      textTheme: ThemeData(
-        brightness: _themeMode == ThemeMode.dark
-            ? Brightness.dark
-            : Brightness.light,
-      ).textTheme.apply(bodyColor: _ink, displayColor: _ink),
-      dividerColor: _line,
+      textTheme:
+          ThemeData(brightness: isDark ? Brightness.dark : Brightness.light)
+              .textTheme
+              .apply(
+                bodyColor: isDark ? const Color(0xFFF7F3EA) : _ink,
+                displayColor: isDark ? const Color(0xFFF7F3EA) : _ink,
+              ),
+      dividerColor: isDark ? const Color(0xFF2D3A4B) : _line,
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: _themeMode == ThemeMode.dark
@@ -191,7 +337,11 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
                             alignment: Alignment.topCenter,
                             child: ConstrainedBox(
                               constraints: const BoxConstraints(maxWidth: 1160),
-                              child: _currentPage(),
+                              child:
+                                  _invoices.isEmpty &&
+                                      (_loading || _loadError != null)
+                                  ? _startupState()
+                                  : _currentPage(),
                             ),
                           ),
                         ),
@@ -237,6 +387,12 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
           if (!isWide) const Spacer(),
           const _SandboxPill(),
           SizedBox(width: isWide ? 12 : 4),
+          if (isWide)
+            IconButton(
+              tooltip: 'Refresh invoice records',
+              onPressed: _loading ? null : _reloadInvoices,
+              icon: const Icon(Icons.refresh_rounded),
+            ),
           IconButton(
             tooltip: _themeMode == ThemeMode.light
                 ? 'Switch to dark theme'
@@ -267,9 +423,9 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
   Widget _desktopNavigation() {
     return Container(
       width: 244,
-      decoration: const BoxDecoration(
-        color: _paper,
-        border: Border(right: BorderSide(color: _line)),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        border: const Border(right: BorderSide(color: _line)),
       ),
       padding: const EdgeInsets.fromLTRB(24, 28, 18, 24),
       child: Column(
@@ -286,7 +442,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: _canvas,
+              color: Theme.of(context).colorScheme.surfaceContainerLow,
               borderRadius: BorderRadius.circular(18),
               border: Border.all(color: _line),
             ),
@@ -309,7 +465,7 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
           ),
           const SizedBox(height: 18),
           const Text(
-            'ALVAPAY  ·  PREVIEW',
+            'ALVAPAY  ·  SANDBOX',
             style: TextStyle(color: _muted, fontSize: 10),
           ),
         ],
@@ -351,8 +507,17 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
 
   Widget _currentPage() {
     return switch (_selectedIndex) {
-      1 => InvoiceList(invoices: _invoices, onCreateInvoice: _openComposer),
-      2 => const AssistantPage(),
+      1 => InvoiceList(
+        invoices: _invoices,
+        onCreateInvoice: _openComposer,
+        onReviewInvoice: _reviewAndCheckout,
+        onOpenCheckout: _openApprovalUrl,
+        onVerifyInvoice: _verifyPayment,
+        onRefreshInvoice: _refreshInvoice,
+        isBusy: _isInvoiceBusy,
+        onRefresh: _reloadInvoices,
+      ),
+      2 => AssistantPage(onCreateInvoice: _openComposer),
       _ => DashboardPage(
         invoices: _invoices,
         onCreateInvoice: _openComposer,
@@ -361,6 +526,37 @@ class _AlvaPayAppState extends State<AlvaPayApp> {
       ),
     };
   }
+}
+
+Map<String, int> _totalsByCurrency(Iterable<Invoice> invoices) {
+  final totals = <String, int>{};
+  for (final invoice in invoices) {
+    totals.update(
+      invoice.currency,
+      (total) => total + invoice.amountCents,
+      ifAbsent: () => invoice.amountCents,
+    );
+  }
+  return totals;
+}
+
+String _currentDateLabel() {
+  const months = [
+    'JANUARY',
+    'FEBRUARY',
+    'MARCH',
+    'APRIL',
+    'MAY',
+    'JUNE',
+    'JULY',
+    'AUGUST',
+    'SEPTEMBER',
+    'OCTOBER',
+    'NOVEMBER',
+    'DECEMBER',
+  ];
+  final today = DateTime.now();
+  return '${months[today.month - 1]} ${today.day}';
 }
 
 class DashboardPage extends StatelessWidget {
@@ -381,12 +577,16 @@ class DashboardPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     final isWide = width >= 720;
-    final awaiting = invoices
-        .where((invoice) => invoice.status == InvoiceStatus.awaiting)
-        .fold<int>(0, (total, invoice) => total + invoice.amountCents);
-    final collected = invoices
-        .where((invoice) => invoice.status == InvoiceStatus.paid)
-        .fold<int>(0, (total, invoice) => total + invoice.amountCents);
+    final awaiting = _totalsByCurrency(
+      invoices.where(
+        (invoice) =>
+            invoice.status == InvoiceStatus.awaiting ||
+            invoice.status == InvoiceStatus.processing,
+      ),
+    );
+    final collected = _totalsByCurrency(
+      invoices.where((invoice) => invoice.status == InvoiceStatus.paid),
+    );
     final recent = invoices.take(3).toList();
 
     return SingleChildScrollView(
@@ -397,11 +597,11 @@ class DashboardPage extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _Eyebrow('THURSDAY  ·  OCTOBER 15'),
+                    _Eyebrow(_currentDateLabel()),
                     SizedBox(height: 9),
                     Text(
                       'Make room for\nyour next big thing.',
@@ -439,8 +639,8 @@ class DashboardPage extends StatelessWidget {
           ],
           const SizedBox(height: 26),
           _MomentumCard(
-            awaitingCents: awaiting,
-            collectedCents: collected,
+            awaitingTotals: awaiting,
+            collectedTotals: collected,
             onOpenAssistant: onOpenAssistant,
           ),
           const SizedBox(height: 22),
@@ -459,7 +659,7 @@ class DashboardPage extends StatelessWidget {
                       icon: Icons.hourglass_top_rounded,
                       label: 'In progress',
                       value:
-                          '${invoices.where((i) => i.status == InvoiceStatus.awaiting).length}',
+                          '${invoices.where((i) => i.status == InvoiceStatus.awaiting || i.status == InvoiceStatus.processing).length}',
                       caption: 'Awaiting payment',
                       accent: const Color(0xFFF7EBD3),
                     ),
@@ -514,7 +714,7 @@ class DashboardPage extends StatelessWidget {
           _ActivityCard(invoices: recent),
           const SizedBox(height: 16),
           const Text(
-            'Illustrative preview data · Connect your account for live payment records.',
+            'Payment states update only after server verification.',
             style: TextStyle(fontSize: 11, color: _muted),
           ),
         ],
@@ -525,13 +725,13 @@ class DashboardPage extends StatelessWidget {
 
 class _MomentumCard extends StatelessWidget {
   const _MomentumCard({
-    required this.awaitingCents,
-    required this.collectedCents,
+    required this.awaitingTotals,
+    required this.collectedTotals,
     required this.onOpenAssistant,
   });
 
-  final int awaitingCents;
-  final int collectedCents;
+  final Map<String, int> awaitingTotals;
+  final Map<String, int> collectedTotals;
   final VoidCallback onOpenAssistant;
 
   @override
@@ -554,35 +754,41 @@ class _MomentumCard extends StatelessWidget {
               ),
             ),
             const Spacer(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(30),
-                border: Border.all(color: Colors.white24),
-              ),
-              child: const Text(
-                'SAMPLE',
-                style: TextStyle(color: _gold, fontSize: 9, letterSpacing: 1),
-              ),
-            ),
           ],
         ),
         const SizedBox(height: 26),
-        Text(
-          _money(awaitingCents, 'USD'),
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 38,
-            height: 1,
-            letterSpacing: -1.3,
-            fontWeight: FontWeight.w600,
-            fontFeatures: [FontFeature.tabularFigures()],
-          ),
-        ),
+        if (awaitingTotals.isEmpty)
+          const Text(
+            'No open invoices',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 27,
+              height: 1.1,
+              letterSpacing: -0.8,
+              fontWeight: FontWeight.w600,
+            ),
+          )
+        else
+          for (var index = 0; index < awaitingTotals.length; index++)
+            Text(
+              _money(
+                awaitingTotals.values.elementAt(index),
+                awaitingTotals.keys.elementAt(index),
+              ),
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: index == 0 ? 34 : 18,
+                height: 1.1,
+                letterSpacing: -0.8,
+                fontWeight: FontWeight.w600,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
         const SizedBox(height: 8),
-        const Text(
-          'Still on its way to you',
+        Text(
+          awaitingTotals.isEmpty
+              ? 'Your verified records, in one place'
+              : 'Still on its way to you',
           style: TextStyle(color: Colors.white70, fontSize: 13),
         ),
         const SizedBox(height: 23),
@@ -594,7 +800,9 @@ class _MomentumCard extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                '${_money(collectedCents, 'USD')} collected',
+                collectedTotals.isEmpty
+                    ? 'Nothing collected yet'
+                    : '${collectedTotals.entries.map((entry) => _money(entry.value, entry.key)).join(' · ')} collected',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
@@ -765,17 +973,31 @@ class _MetricCard extends StatelessWidget {
 }
 
 class _ActivityCard extends StatelessWidget {
-  const _ActivityCard({required this.invoices});
+  const _ActivityCard({
+    required this.invoices,
+    this.showActions = false,
+    this.onReviewInvoice,
+    this.onOpenCheckout,
+    this.onVerifyInvoice,
+    this.onRefreshInvoice,
+    this.isBusy,
+  });
 
   final List<Invoice> invoices;
+  final bool showActions;
+  final ValueChanged<Invoice>? onReviewInvoice;
+  final ValueChanged<Invoice>? onOpenCheckout;
+  final ValueChanged<Invoice>? onVerifyInvoice;
+  final ValueChanged<Invoice>? onRefreshInvoice;
+  final bool Function(Invoice)? isBusy;
 
   @override
   Widget build(BuildContext context) {
     if (invoices.isEmpty) {
       return const _EmptyState(
         icon: Icons.receipt_long_outlined,
-        title: 'Nothing here just yet',
-        message: 'Your next invoice will feel right at home.',
+        title: 'No invoices yet',
+        message: 'Describe your work and Alva will help shape a first draft.',
       );
     }
     return Container(
@@ -787,7 +1009,15 @@ class _ActivityCard extends StatelessWidget {
       child: Column(
         children: [
           for (var index = 0; index < invoices.length; index++) ...[
-            _InvoiceRow(invoice: invoices[index]),
+            _InvoiceRow(
+              invoice: invoices[index],
+              showActions: showActions,
+              onReview: onReviewInvoice,
+              onOpenCheckout: onOpenCheckout,
+              onVerify: onVerifyInvoice,
+              onRefresh: onRefreshInvoice,
+              isBusy: isBusy?.call(invoices[index]) ?? false,
+            ),
             if (index != invoices.length - 1)
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 16),
@@ -804,11 +1034,23 @@ class InvoiceList extends StatefulWidget {
   const InvoiceList({
     required this.invoices,
     required this.onCreateInvoice,
+    required this.onReviewInvoice,
+    required this.onOpenCheckout,
+    required this.onVerifyInvoice,
+    required this.onRefreshInvoice,
+    required this.isBusy,
+    required this.onRefresh,
     super.key,
   });
 
   final List<Invoice> invoices;
   final VoidCallback onCreateInvoice;
+  final ValueChanged<Invoice> onReviewInvoice;
+  final ValueChanged<Invoice> onOpenCheckout;
+  final ValueChanged<Invoice> onVerifyInvoice;
+  final ValueChanged<Invoice> onRefreshInvoice;
+  final bool Function(Invoice) isBusy;
+  final Future<void> Function() onRefresh;
 
   @override
   State<InvoiceList> createState() => _InvoiceListState();
@@ -821,234 +1063,163 @@ class _InvoiceListState extends State<InvoiceList> {
   Widget build(BuildContext context) {
     final filtered = widget.invoices.where((invoice) {
       return switch (_filter) {
-        'Awaiting' => invoice.status == InvoiceStatus.awaiting,
+        'Awaiting' =>
+          invoice.status == InvoiceStatus.awaiting ||
+              invoice.status == InvoiceStatus.processing,
         'Paid' => invoice.status == InvoiceStatus.paid,
         'Drafts' => invoice.status == InvoiceStatus.draft,
         _ => true,
       };
     }).toList();
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 22, 24, 36),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const _Eyebrow('YOUR CLIENT WORK'),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'Invoices',
-                  style: TextStyle(
-                    fontFamily: 'serif',
-                    fontSize: 36,
-                    letterSpacing: -1,
+    return RefreshIndicator(
+      onRefresh: widget.onRefresh,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 36),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const _Eyebrow('YOUR CLIENT WORK'),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Invoices',
+                    style: TextStyle(
+                      fontFamily: 'serif',
+                      fontSize: 36,
+                      letterSpacing: -1,
+                    ),
                   ),
                 ),
-              ),
-              FilledButton.icon(
-                onPressed: widget.onCreateInvoice,
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('New'),
-                style: _primaryButtonStyle(),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Every detail, in one thoughtful place.',
-            style: TextStyle(color: _muted),
-          ),
-          const SizedBox(height: 22),
-          Wrap(
-            spacing: 8,
-            children: [
-              for (final filter in ['All', 'Awaiting', 'Paid', 'Drafts'])
-                ChoiceChip(
-                  label: Text(filter),
-                  selected: _filter == filter,
-                  onSelected: (_) => setState(() => _filter = filter),
-                  selectedColor: _mint,
-                  side: BorderSide(color: _filter == filter ? _mint : _line),
-                  labelStyle: TextStyle(
-                    color: _filter == filter ? _forest : _muted,
-                    fontWeight: FontWeight.w600,
-                  ),
+                FilledButton.icon(
+                  onPressed: widget.onCreateInvoice,
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('New'),
+                  style: _primaryButtonStyle(),
                 ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          if (filtered.isEmpty)
-            const _EmptyState(
-              icon: Icons.filter_list_off_rounded,
-              title: 'No matching invoices',
-              message: 'Try another filter or start a fresh draft.',
-            )
-          else
-            _ActivityCard(invoices: filtered),
-          const SizedBox(height: 14),
-          const Text(
-            'Demo invoices are synthetic. Live payment status will be verified by the server.',
-            style: TextStyle(fontSize: 11, color: _muted),
-          ),
-        ],
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Every detail, in one thoughtful place.',
+              style: TextStyle(color: _muted),
+            ),
+            const SizedBox(height: 22),
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final filter in ['All', 'Awaiting', 'Paid', 'Drafts'])
+                  ChoiceChip(
+                    label: Text(filter),
+                    selected: _filter == filter,
+                    onSelected: (_) => setState(() => _filter = filter),
+                    selectedColor: _mint,
+                    side: BorderSide(color: _filter == filter ? _mint : _line),
+                    labelStyle: TextStyle(
+                      color: _filter == filter ? _forest : _muted,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (filtered.isEmpty)
+              _EmptyState(
+                icon: widget.invoices.isEmpty
+                    ? Icons.receipt_long_outlined
+                    : Icons.filter_list_off_rounded,
+                title: widget.invoices.isEmpty
+                    ? 'No invoices yet'
+                    : 'No matching invoices',
+                message: widget.invoices.isEmpty
+                    ? 'Describe your work and Alva will help shape a first draft.'
+                    : 'Try another filter or start a fresh draft.',
+              )
+            else
+              _ActivityCard(
+                invoices: filtered,
+                showActions: true,
+                onReviewInvoice: widget.onReviewInvoice,
+                onOpenCheckout: widget.onOpenCheckout,
+                onVerifyInvoice: widget.onVerifyInvoice,
+                onRefreshInvoice: widget.onRefreshInvoice,
+                isBusy: widget.isBusy,
+              ),
+            const SizedBox(height: 14),
+            const Text(
+              'Payment status is confirmed by the AlvaPay backend, never by a redirect.',
+              style: TextStyle(fontSize: 11, color: _muted),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class AssistantPage extends StatefulWidget {
-  const AssistantPage({super.key});
+class AssistantPage extends StatelessWidget {
+  const AssistantPage({required this.onCreateInvoice, super.key});
 
-  @override
-  State<AssistantPage> createState() => _AssistantPageState();
-}
-
-class _AssistantPageState extends State<AssistantPage> {
-  final _controller = TextEditingController();
-  final List<String> _messages = [];
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _send(String text) {
-    final message = text.trim();
-    if (message.isEmpty) return;
-    setState(() {
-      _messages.add(message);
-      _controller.clear();
-    });
-  }
+  final VoidCallback onCreateInvoice;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 22, 24, 20),
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    return SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(wide ? 38 : 24, 28, wide ? 38 : 24, 36),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const _Eyebrow('A THOUGHTFUL SECOND PAIR OF HANDS'),
+          const _Eyebrow('ALVAPAY AI'),
           const SizedBox(height: 8),
           const Text(
-            'Ask Alva',
+            'A clearer first draft.',
             style: TextStyle(
               fontFamily: 'serif',
               fontSize: 36,
               letterSpacing: -1,
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           const Text(
-            'A calmer way to stay close to your cash flow.',
-            style: TextStyle(color: _muted),
+            'Describe the work in your own words. Alva turns it into an editable invoice draft; nothing is saved or sent until you review it.',
+            style: TextStyle(color: _muted, height: 1.55),
           ),
-          const SizedBox(height: 18),
-          Expanded(
-            child: ListView(
+          const SizedBox(height: 22),
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surface,
+              border: Border.all(color: _line),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.surface,
-                    border: Border.all(color: _line),
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  child: const Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _BrandMonogram(),
-                      SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          'I can help shape an invoice or make sense of your cash flow. '
-                          'Once connected, I’ll use only payment records verified by the server.',
-                          style: TextStyle(height: 1.5),
-                        ),
-                      ),
-                    ],
+                _BrandMonogram(),
+                SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    'AI can suggest the client, service, amount, currency, and due date. You remain in control of every field and every payment.',
+                    style: TextStyle(height: 1.55),
                   ),
                 ),
-                const SizedBox(height: 16),
-                for (final message in _messages)
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Container(
-                      margin: const EdgeInsets.only(bottom: 10),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
-                      decoration: BoxDecoration(
-                        color: _forest,
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      child: Text(
-                        message,
-                        style: const TextStyle(color: Colors.white),
-                      ),
-                    ),
-                  ),
-                if (_messages.isNotEmpty)
-                  const _EmptyState(
-                    icon: Icons.lock_outline_rounded,
-                    title: 'Your question is ready',
-                    message: 'Connect the private AI service to get an answer based on verified account records.',
-                  ),
               ],
             ),
           ),
-          if (_messages.isEmpty) ...[
-            const _Eyebrow('A FEW PLACES TO BEGIN'),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _SuggestionChip(
-                  label: 'Who still owes me?',
-                  onTap: () => _send('Who still owes me?'),
-                ),
-                _SuggestionChip(
-                  label: 'Summarize my cash flow',
-                  onTap: () => _send('Summarize my cash flow'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-          ],
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _controller,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: _send,
-                  decoration: const InputDecoration(
-                    hintText: 'Ask anything about your business…',
-                    prefixIcon: Icon(Icons.auto_awesome_outlined),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              IconButton.filled(
-                tooltip: 'Send question',
-                onPressed: () => _send(_controller.text),
-                icon: const Icon(Icons.arrow_upward_rounded),
-                style: IconButton.styleFrom(
-                  backgroundColor: _forest,
-                  foregroundColor: Colors.white,
-                  minimumSize: const Size(52, 52),
-                ),
-              ),
-            ],
+          const SizedBox(height: 22),
+          FilledButton.icon(
+            onPressed: onCreateInvoice,
+            icon: const Icon(Icons.auto_awesome_outlined),
+            label: const Text('Draft an invoice with AI'),
+            style: _primaryButtonStyle(),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 14),
           const Text(
-            'Preview mode · AI answers will be grounded in verified records.',
-            style: TextStyle(fontSize: 10, color: _muted),
+            'Cash-flow chat is not connected yet. Alva never invents payment records.',
+            style: TextStyle(color: _muted, fontSize: 12),
           ),
         ],
       ),
@@ -1057,7 +1228,15 @@ class _AssistantPageState extends State<AssistantPage> {
 }
 
 class InvoiceComposer extends StatefulWidget {
-  const InvoiceComposer({super.key});
+  const InvoiceComposer({
+    required this.analyzeInvoice,
+    required this.saveInvoice,
+    super.key,
+  });
+
+  final Future<Map<String, dynamic>> Function(String text) analyzeInvoice;
+  final Future<Invoice> Function(InvoiceDraft draft, String idempotencyKey)
+  saveInvoice;
 
   @override
   State<InvoiceComposer> createState() => _InvoiceComposerState();
@@ -1069,8 +1248,13 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
   final _email = TextEditingController();
   final _description = TextEditingController();
   final _amount = TextEditingController();
+  final _brief = TextEditingController();
+  final _saveKey = newIdempotencyKey();
   DateTime _dueDate = DateTime.now().add(const Duration(days: 14));
   String _currency = 'USD';
+  bool _analyzing = false;
+  bool _saving = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -1078,6 +1262,7 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
     _email.dispose();
     _description.dispose();
     _amount.dispose();
+    _brief.dispose();
     super.dispose();
   }
 
@@ -1090,18 +1275,76 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
     return whole * 100 + (fraction.isEmpty ? 0 : int.parse(fraction));
   }
 
-  void _save() {
+  Future<void> _analyzeBrief() async {
+    final text = _brief.text.trim();
+    if (text.length < 8 || _analyzing) {
+      setState(() => _error = 'Add a short description of the invoice first.');
+      return;
+    }
+    setState(() {
+      _analyzing = true;
+      _error = null;
+    });
+    try {
+      final draft = await widget.analyzeInvoice(text);
+      if (!mounted) return;
+      final customerName = draft['customer_name'];
+      final customerEmail = draft['customer_email'];
+      final description = draft['service_description'];
+      final amountCents = draft['amount_cents'];
+      final currency = draft['currency'];
+      final dueDate = draft['due_date'];
+      if (customerName is String) _client.text = customerName;
+      if (customerEmail is String) _email.text = customerEmail;
+      if (description is String) _description.text = description;
+      if (amountCents is int) {
+        _amount.text = (amountCents / 100).toStringAsFixed(2);
+      }
+      if (currency is String &&
+          const {'USD', 'EUR', 'GBP', 'CAD'}.contains(currency)) {
+        _currency = currency;
+      }
+      final parsedDate = dueDate is String ? DateTime.tryParse(dueDate) : null;
+      if (parsedDate != null) _dueDate = parsedDate;
+      setState(() {});
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = error is AlvaPayApiException ? error.message : 'Alva could not analyze that brief. Check the connection and try again.';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _analyzing = false);
+    }
+  }
+
+  Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    final invoice = Invoice(
+    if (_saving) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    final draft = InvoiceDraft(
       client: _client.text.trim(),
       customerEmail: _email.text.trim(),
       description: _description.text.trim(),
       amountCents: _parseAmount(_amount.text)!,
       dueDate: _dueDate,
-      status: InvoiceStatus.draft,
       currency: _currency,
     );
-    Navigator.of(context).pop(invoice);
+    try {
+      final invoice = await widget.saveInvoice(draft, _saveKey);
+      if (mounted) Navigator.of(context).pop(invoice);
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = error is AlvaPayApiException ? error.message : 'The draft could not be saved. Check your connection and retry.';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   @override
@@ -1116,181 +1359,266 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
           color: Theme.of(context).colorScheme.surface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
         ),
-        child: Form(
-          key: _formKey,
-          child: ListView(
-            controller: scrollController,
-            padding: EdgeInsets.fromLTRB(
-              22,
-              14,
-              22,
-              24 + MediaQuery.viewInsetsOf(context).bottom,
-            ),
-            children: [
-              Center(
-                child: Container(
-                  width: 38,
-                  height: 4,
+        child: SingleChildScrollView(
+          controller: scrollController,
+          padding: EdgeInsets.fromLTRB(
+            22,
+            14,
+            22,
+            24 + MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 38,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: _line,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 22),
+                const _Eyebrow('A FRESH START'),
+                const SizedBox(height: 7),
+                const Text(
+                  'Create an invoice',
+                  style: TextStyle(
+                    fontFamily: 'serif',
+                    fontSize: 31,
+                    letterSpacing: -0.7,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Shape the details. Your client never sees a thing until you say so.',
+                  style: TextStyle(color: _muted, height: 1.4),
+                ),
+                const SizedBox(height: 22),
+                Container(
+                  padding: const EdgeInsets.all(15),
                   decoration: BoxDecoration(
-                    color: _line,
-                    borderRadius: BorderRadius.circular(8),
+                    color: Theme.of(context).colorScheme.surfaceContainerLow,
+                    border: Border.all(color: _line),
+                    borderRadius: BorderRadius.circular(16),
                   ),
-                ),
-              ),
-              const SizedBox(height: 22),
-              const _Eyebrow('A FRESH START'),
-              const SizedBox(height: 7),
-              const Text(
-                'Create an invoice',
-                style: TextStyle(
-                  fontFamily: 'serif',
-                  fontSize: 31,
-                  letterSpacing: -0.7,
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Shape the details. Your client never sees a thing until you say so.',
-                style: TextStyle(color: _muted, height: 1.4),
-              ),
-              const SizedBox(height: 22),
-              TextFormField(
-                key: const Key('invoice-client-name'),
-                controller: _client,
-                textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(labelText: 'Client name'),
-                validator: (value) => value == null || value.trim().isEmpty
-                    ? 'Add a client name'
-                    : null,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                key: const Key('invoice-client-email'),
-                controller: _email,
-                keyboardType: TextInputType.emailAddress,
-                decoration: const InputDecoration(labelText: 'Client email'),
-                validator: (value) {
-                  if (value == null ||
-                      !RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
-                          .hasMatch(value.trim())) {
-                    return 'Enter a valid email address';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                key: const Key('invoice-description'),
-                controller: _description,
-                textCapitalization: TextCapitalization.sentences,
-                maxLines: 2,
-                decoration: const InputDecoration(
-                  labelText: 'What did you make together?',
-                ),
-                validator: (value) => value == null || value.trim().isEmpty
-                    ? 'Add a service description'
-                    : null,
-              ),
-              const SizedBox(height: 12),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: TextFormField(
-                      key: const Key('invoice-amount'),
-                      controller: _amount,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const _Eyebrow('START WITH A SENTENCE'),
+                      const SizedBox(height: 10),
+                      TextField(
+                        key: const Key('invoice-natural-language'),
+                        controller: _brief,
+                        minLines: 2,
+                        maxLines: 4,
+                        decoration: const InputDecoration(
+                          hintText: 'e.g. Brand identity for Morrow Studio, USD 840.50, due October 20',
+                          alignLabelWithHint: true,
+                        ),
                       ),
-                      decoration: const InputDecoration(
-                        labelText: 'Amount',
-                        hintText: '0.00',
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _SuggestionChip(
+                            label: 'Brand identity · USD 840.50',
+                            onTap: () {
+                              _brief.text =
+                                  'Brand identity project for Morrow Studio, '
+                                  'USD 840.50, due October 20, 2026.';
+                            },
+                          ),
+                          _SuggestionChip(
+                            label: 'Product photography · EUR 1,250',
+                            onTap: () {
+                              _brief.text =
+                                  'Product photography for Juniper Coffee, '
+                                  'EUR 1,250, due November 3, 2026.';
+                            },
+                          ),
+                        ],
                       ),
-                      validator: (value) {
-                        final amount = value == null
-                            ? null
-                            : _parseAmount(value);
-                        return amount == null || amount <= 0
-                            ? 'Enter a valid amount'
-                            : null;
-                      },
-                    ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _analyzing ? null : _analyzeBrief,
+                        icon: _analyzing
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.auto_awesome_outlined),
+                        label: Text(
+                          _analyzing
+                              ? 'Reading your brief…'
+                              : 'Analyze with Alva AI',
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size.fromHeight(48),
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: DropdownButtonFormField<String>(
-                      initialValue: _currency,
-                      decoration: const InputDecoration(labelText: 'Currency'),
-                      items: const [
-                        DropdownMenuItem(value: 'USD', child: Text('USD')),
-                        DropdownMenuItem(value: 'EUR', child: Text('EUR')),
-                        DropdownMenuItem(value: 'GBP', child: Text('GBP')),
-                        DropdownMenuItem(value: 'CAD', child: Text('CAD')),
-                      ],
-                      onChanged: (value) {
-                        if (value != null) setState(() => _currency = value);
-                      },
-                    ),
-                  ),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  _InlineError(message: _error!),
                 ],
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  final date = await showDatePicker(
-                    context: context,
-                    initialDate: _dueDate,
-                    firstDate: DateTime.now(),
-                    lastDate: DateTime.now().add(const Duration(days: 365)),
-                  );
-                  if (date != null) setState(() => _dueDate = date);
-                },
-                icon: const Icon(Icons.calendar_month_outlined),
-                label: Text('Due ${_formatDate(_dueDate)}'),
-                style: OutlinedButton.styleFrom(
-                  alignment: Alignment.centerLeft,
-                  minimumSize: const Size.fromHeight(50),
-                  foregroundColor: _ink,
-                  side: const BorderSide(color: _line),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
+                const SizedBox(height: 18),
+                TextFormField(
+                  key: const Key('invoice-client-name'),
+                  controller: _client,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(labelText: 'Client name'),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Add a client name'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  key: const Key('invoice-client-email'),
+                  controller: _email,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(labelText: 'Client email'),
+                  validator: (value) {
+                    if (value == null ||
+                        !RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+                            .hasMatch(value.trim())) {
+                      return 'Enter a valid email address';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  key: const Key('invoice-description'),
+                  controller: _description,
+                  textCapitalization: TextCapitalization.sentences,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'What did you make together?',
                   ),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Add a service description'
+                      : null,
                 ),
-              ),
-              const SizedBox(height: 18),
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF7F3E8),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: const Row(
+                const SizedBox(height: 12),
+                Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.auto_awesome_outlined, size: 18, color: _forest),
-                    SizedBox(width: 10),
                     Expanded(
-                      child: Text(
-                        'AI drafting and PayPal checkout will be enabled when the secure backend is connected. '
-                        'This saves a local draft only.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          height: 1.45,
-                          color: _ink,
+                      flex: 2,
+                      child: TextFormField(
+                        key: const Key('invoice-amount'),
+                        controller: _amount,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
                         ),
+                        decoration: const InputDecoration(
+                          labelText: 'Amount',
+                          hintText: '0.00',
+                        ),
+                        validator: (value) {
+                          final amount = value == null
+                              ? null
+                              : _parseAmount(value);
+                          return amount == null || amount <= 0
+                              ? 'Enter a valid amount'
+                              : null;
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: _currency,
+                        decoration: const InputDecoration(
+                          labelText: 'Currency',
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 'USD', child: Text('USD')),
+                          DropdownMenuItem(value: 'EUR', child: Text('EUR')),
+                          DropdownMenuItem(value: 'GBP', child: Text('GBP')),
+                          DropdownMenuItem(value: 'CAD', child: Text('CAD')),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) setState(() => _currency = value);
+                        },
                       ),
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(height: 18),
-              FilledButton(
-                onPressed: _save,
-                style: _primaryButtonStyle(),
-                child: const Text('Save invoice draft'),
-              ),
-            ],
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final date = await showDatePicker(
+                      context: context,
+                      initialDate: _dueDate,
+                      firstDate: DateTime.now(),
+                      lastDate: DateTime.now().add(const Duration(days: 365)),
+                    );
+                    if (date != null) setState(() => _dueDate = date);
+                  },
+                  icon: const Icon(Icons.calendar_month_outlined),
+                  label: Text('Due ${_formatDate(_dueDate)}'),
+                  style: OutlinedButton.styleFrom(
+                    alignment: Alignment.centerLeft,
+                    minimumSize: const Size.fromHeight(50),
+                    foregroundColor: _ink,
+                    side: const BorderSide(color: _line),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surfaceContainerLow,
+                    border: Border.all(color: _line),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.auto_awesome_outlined,
+                        size: 18,
+                        color: _forest,
+                      ),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Review every field above. Saving creates a private draft only; PayPal is not contacted until you confirm the exact total.',
+                          style: TextStyle(fontSize: 12, height: 1.45),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 18),
+                FilledButton(
+                  onPressed: _saving ? null : _save,
+                  style: _primaryButtonStyle(),
+                  child: _saving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Save reviewed draft'),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1298,47 +1626,43 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
   }
 }
 
-class _InvoiceRow extends StatelessWidget {
-  const _InvoiceRow({required this.invoice});
+class CheckoutConfirmationSheet extends StatelessWidget {
+  const CheckoutConfirmationSheet({required this.invoice, super.key});
 
   final Invoice invoice;
 
   @override
   Widget build(BuildContext context) {
-    final statusColor = switch (invoice.status) {
-      InvoiceStatus.paid => const Color(0xFF347359),
-      InvoiceStatus.awaiting => const Color(0xFF9B6B19),
-      InvoiceStatus.draft => _muted,
-    };
-    final statusText = switch (invoice.status) {
-      InvoiceStatus.paid => 'Paid',
-      InvoiceStatus.awaiting => 'Awaiting',
-      InvoiceStatus.draft => 'Draft',
-    };
-    final statusIcon = switch (invoice.status) {
-      InvoiceStatus.paid => Icons.check_circle_outline_rounded,
-      InvoiceStatus.awaiting => Icons.schedule_rounded,
-      InvoiceStatus.draft => Icons.edit_note_rounded,
-    };
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Row(
+    return Container(
+      padding: EdgeInsets.fromLTRB(
+        24,
+        26,
+        24,
+        24 + MediaQuery.viewInsetsOf(context).bottom,
+      ),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: _canvas,
-              borderRadius: BorderRadius.circular(13),
-            ),
-            child: const Icon(
-              Icons.description_outlined,
-              size: 19,
-              color: _forest,
-            ),
+          const _Eyebrow('FINAL REVIEW'),
+          const SizedBox(height: 8),
+          const Text(
+            'Confirm this request',
+            style: TextStyle(fontFamily: 'serif', fontSize: 30),
           ),
-          const SizedBox(width: 13),
-          Expanded(
+          const SizedBox(height: 18),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerLow,
+              border: Border.all(color: _line),
+              borderRadius: BorderRadius.circular(16),
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1346,40 +1670,291 @@ class _InvoiceRow extends StatelessWidget {
                   invoice.client,
                   style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
+                const SizedBox(height: 3),
+                Text(
+                  invoice.customerEmail,
+                  style: const TextStyle(color: _muted),
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  invoice.amount,
+                  key: const Key('confirmation-amount'),
+                  style: const TextStyle(
+                    fontFamily: 'serif',
+                    fontSize: 32,
+                    fontWeight: FontWeight.w600,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
                 const SizedBox(height: 4),
                 Text(
-                  '${invoice.description}  ·  ${_formatDate(invoice.dueDate)}',
-                  style: const TextStyle(color: _muted, fontSize: 11),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  invoice.description,
+                  style: const TextStyle(color: _muted),
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
+          const SizedBox(height: 14),
+          const Text(
+            'You’ll continue to PayPal Sandbox to approve this payment. AlvaPay will not mark it paid unless the backend verifies the completed order.',
+            style: TextStyle(color: _muted, height: 1.45, fontSize: 12),
+          ),
+          const SizedBox(height: 20),
+          Row(
             children: [
-              Text(
-                invoice.amount,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontFeatures: [FontFeature.tabularFigures()],
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(50),
+                  ),
+                  child: const Text('Not now'),
                 ),
               ),
-              const SizedBox(height: 5),
-              Row(
+              const SizedBox(width: 12),
+              Expanded(
+                flex: 2,
+                child: FilledButton(
+                  key: const Key('confirm-checkout'),
+                  onPressed: () => Navigator.of(context).pop(true),
+                  style: _primaryButtonStyle(),
+                  child: const Text('Confirm & continue'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InlineError extends StatelessWidget {
+  const _InlineError({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final errorColor = Theme.of(context).colorScheme.error;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: errorColor.withValues(alpha: 0.08),
+        border: Border.all(color: errorColor.withValues(alpha: 0.3)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline_rounded, color: errorColor, size: 18),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(color: errorColor, fontSize: 12, height: 1.4),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InvoiceRow extends StatelessWidget {
+  const _InvoiceRow({
+    required this.invoice,
+    required this.showActions,
+    required this.onReview,
+    required this.onOpenCheckout,
+    required this.onVerify,
+    required this.onRefresh,
+    required this.isBusy,
+  });
+
+  final Invoice invoice;
+  final bool showActions;
+  final ValueChanged<Invoice>? onReview;
+  final ValueChanged<Invoice>? onOpenCheckout;
+  final ValueChanged<Invoice>? onVerify;
+  final ValueChanged<Invoice>? onRefresh;
+  final bool isBusy;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = switch (invoice.status) {
+      InvoiceStatus.paid => const Color(0xFF347359),
+      InvoiceStatus.awaiting => const Color(0xFF9B6B19),
+      InvoiceStatus.processing => const Color(0xFF54718A),
+      InvoiceStatus.draft => _muted,
+    };
+    final statusText = switch (invoice.status) {
+      InvoiceStatus.paid => 'Paid',
+      InvoiceStatus.awaiting => 'Awaiting',
+      InvoiceStatus.processing => 'Processing',
+      InvoiceStatus.draft => 'Draft',
+    };
+    final statusIcon = switch (invoice.status) {
+      InvoiceStatus.paid => Icons.check_circle_outline_rounded,
+      InvoiceStatus.awaiting => Icons.schedule_rounded,
+      InvoiceStatus.processing => Icons.sync_rounded,
+      InvoiceStatus.draft => Icons.edit_note_rounded,
+    };
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: const Icon(
+                  Icons.description_outlined,
+                  size: 19,
+                  color: _forest,
+                ),
+              ),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      invoice.client,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${invoice.description}'
+                      '${invoice.dueDate == null ? '' : '  ·  Due ${_formatDate(invoice.dueDate!)}'}',
+                      style: const TextStyle(color: _muted, fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Icon(statusIcon, color: statusColor, size: 13),
-                  const SizedBox(width: 4),
                   Text(
-                    statusText,
-                    style: TextStyle(fontSize: 10, color: statusColor),
+                    invoice.amount,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Row(
+                    children: [
+                      Icon(statusIcon, color: statusColor, size: 13),
+                      const SizedBox(width: 4),
+                      Text(
+                        statusText,
+                        style: TextStyle(fontSize: 10, color: statusColor),
+                      ),
+                    ],
                   ),
                 ],
               ),
             ],
           ),
+          if (showActions && invoice.status == InvoiceStatus.draft) ...[
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: isBusy ? null : () => onReview?.call(invoice),
+              icon: const Icon(Icons.fact_check_outlined),
+              label: const Text('Review & send request'),
+              style: FilledButton.styleFrom(minimumSize: const Size(48, 48)),
+            ),
+          ],
+          if (showActions && invoice.status == InvoiceStatus.awaiting) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (invoice.approvalUrl != null)
+                  OutlinedButton.icon(
+                    onPressed: isBusy
+                        ? null
+                        : () => onOpenCheckout?.call(invoice),
+                    icon: const Icon(Icons.open_in_new_rounded),
+                    label: const Text('Open PayPal'),
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(48, 48),
+                    ),
+                  ),
+                FilledButton.tonalIcon(
+                  onPressed: isBusy ? null : () => onVerify?.call(invoice),
+                  icon: isBusy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.verified_outlined),
+                  label: const Text('Verify payment'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(48, 48),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Refresh from PayPal',
+                  onPressed: isBusy ? null : () => onRefresh?.call(invoice),
+                  icon: const Icon(Icons.refresh_rounded),
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 48,
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (showActions && invoice.status == InvoiceStatus.processing) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                if (invoice.paypalOrderId == null)
+                  FilledButton.tonalIcon(
+                    onPressed: isBusy ? null : () => onReview?.call(invoice),
+                    icon: const Icon(Icons.replay_rounded),
+                    label: const Text('Resume checkout'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(48, 48),
+                    ),
+                  )
+                else
+                  FilledButton.tonalIcon(
+                    onPressed: isBusy ? null : () => onVerify?.call(invoice),
+                    icon: const Icon(Icons.verified_outlined),
+                    label: const Text('Verify payment'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(48, 48),
+                    ),
+                  ),
+                IconButton(
+                  tooltip: 'Refresh from PayPal',
+                  onPressed: isBusy ? null : () => onRefresh?.call(invoice),
+                  icon: const Icon(Icons.refresh_rounded),
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 48,
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );

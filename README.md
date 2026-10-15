@@ -1,6 +1,6 @@
 # AlvaPay
 
-**Split smart. Settle softly.**
+**Invoice clearly. Settle confidently.**
 
 AlvaPay helps freelancers turn a plain-language brief into a reviewable invoice
 draft, then creates and captures PayPal Sandbox orders only after the user
@@ -8,12 +8,13 @@ explicitly confirms the details.
 
 ## Project status
 
-Stages 1–5 are implemented: a responsive Flutter preview, validated AI draft
-endpoint, owner-scoped SQLite persistence, and a PayPal Sandbox Orders workflow
-for approval, server-side capture, and status verification. Backend provider
-tests use synthetic responses; no live AI request or PayPal Sandbox payment has
-been made. The Flutter composer and dashboard are still preview/local-data UI
-and are not yet connected to these API routes.
+Stages 1–6 are implemented: a responsive Flutter app connected to the FastAPI
+draft, persistence, and PayPal Sandbox checkout workflow. Users can review an
+AI-assisted draft, save it to SQLite, explicitly confirm its exact amount, open
+PayPal Sandbox, then ask the backend to capture and verify the order. Tests use
+synthetic provider responses; no live AI request or PayPal Sandbox payment has
+been made. Cash-flow chat, production deployment, and submission materials
+remain future work.
 
 ## Repository layout
 
@@ -57,6 +58,18 @@ alvapay/
    flutter run -d chrome --web-port 8080 --dart-define=API_BASE_URL=http://localhost:8000
    ```
 
+   The app stores its private anonymous session token using platform secure
+   storage. For a local Android emulator, the default API address is
+   `http://10.0.2.2:8000`; run the backend on the host and launch:
+
+   ```powershell
+   flutter run -d <emulator-id> --dart-define=API_BASE_URL=http://10.0.2.2:8000
+   ```
+
+   Debug builds permit local cleartext HTTP for emulator development only.
+   Use an HTTPS backend URL for hosted Web builds and production Android
+   releases. `API_BASE_URL` is a public endpoint, not a secret.
+
 ## Build and test
 
 ```powershell
@@ -68,6 +81,7 @@ Set-Location ..\app
 flutter analyze
 flutter test
 flutter build web
+flutter build apk --debug
 ```
 
 ## Product and architecture
@@ -105,9 +119,16 @@ The current backend workflow is:
 
 PayPal order creation, capture, and invoice saves have stable idempotency
 protection. The backend currently uses polling during capture/refresh; PayPal
-webhooks, AI cash-flow summaries/chat, and full Flutter-to-API wiring remain
-future work. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system
-diagram.
+webhooks, and AI cash-flow summaries/chat remain future work. The Flutter app
+is wired to the draft, invoice, checkout, capture, and refresh routes, and keeps
+the session token out of source control. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for the system diagram.
+
+Without provider credentials, the backend deliberately returns a clear
+configuration error for AI drafting or PayPal checkout; the app does not
+substitute sample AI or payment results. Add sandbox credentials only to
+`backend/.env` using [.env.example](.env.example) as a guide. Do not put them in
+Flutter build defines or paste them into source files.
 
 ## Security
 
