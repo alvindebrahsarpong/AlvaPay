@@ -8,9 +8,10 @@ explicitly confirms the details.
 
 ## Project status
 
-Stages 1–2 complete: FastAPI health service and responsive Flutter preview
-verified. Invoice drafting currently saves only local drafts; AI and PayPal
-checkout are not connected yet.
+Stages 1–3 complete: responsive Flutter preview, FastAPI health service, and
+validated AI invoice-draft endpoint are implemented and tested. The Flutter
+composer still saves local drafts; app-to-API wiring and PayPal checkout remain
+incomplete.
 
 ## Repository layout
 
@@ -73,6 +74,14 @@ AlvaPay uses an AI provider to prepare a structured invoice draft from natural
 language. People can review and edit the draft before explicit confirmation
 creates a PayPal Sandbox checkout order. Payment status is only updated after
 server-side verification with PayPal.
+
+The backend's `POST /api/ai/draft` endpoint uses Anthropic's Messages API with
+JSON Schema structured output and validates the returned draft again with
+Pydantic. The default model is `claude-sonnet-5-5`; set `AI_MODEL` to an
+available model and `AI_API_KEY` in `backend/.env`. If the key is missing, the
+endpoint returns a clear configuration error; it does not fabricate a draft.
+The extraction request sends the invoice description to the configured AI
+provider.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the initial system diagram.
 Cash-flow summaries are based on verified records stored by the service. Setup,

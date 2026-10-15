@@ -1226,7 +1226,7 @@ class _InvoiceComposerState extends State<InvoiceComposer> {
                         DropdownMenuItem(value: 'USD', child: Text('USD')),
                         DropdownMenuItem(value: 'EUR', child: Text('EUR')),
                         DropdownMenuItem(value: 'GBP', child: Text('GBP')),
-                        DropdownMenuItem(value: 'GHS', child: Text('GHS')),
+                        DropdownMenuItem(value: 'CAD', child: Text('CAD')),
                       ],
                       onChanged: (value) {
                         if (value != null) setState(() => _currency = value);
