@@ -198,36 +198,48 @@ For a Render Python web service (see Render's
 [web-service guide](https://render.com/docs/web-services), and
 [persistent-disk guide](https://render.com/docs/disks)):
 
-1. Set the service root directory to `backend`, install with
-   `pip install -e .`, and start with
-   `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
-2. Attach a persistent disk mounted at `/var/data`, then set
-   `DATABASE_PATH=/var/data/alvapay.sqlite3`.
-3. Configure `CORS_ORIGINS` to the exact HTTPS origin of the deployed Flutter
-   site (no path or trailing slash), and set `APP_RETURN_URL` to that site's
-   URL. Add the PayPal Sandbox and Anthropic credentials in the host's secret
-   environment settings, not in the repository.
-4. Build the web client for the deployed API and publish `app/build/web` using
-   a static host:
+1. Push this repository to GitHub or another Git provider and connect it to
+   Render. Render detects the root [`render.yaml`](render.yaml) Blueprint.
+   Review and deploy the `alvapay-api` service. The Blueprint installs the
+   backend, starts Uvicorn on Render's assigned port, and attaches a 1 GB
+   persistent disk at `/var/data` for SQLite.
+2. In the Render service's Environment settings, set `CORS_ORIGINS` to the
+   exact HTTPS origin of the deployed Flutter site (no path or trailing slash)
+   and `APP_RETURN_URL` to that site's URL. Add the PayPal Sandbox and
+   Anthropic credentials there only if those integrations are to be used.
+   Never add credentials to the Blueprint, Flutter build, or repository.
+3. Check `https://<your-api-host>/api/health`. For a Flutter Web build, compile
+   the public API URL into the client and publish `app/build/web` using a
+   static host:
 
    ```powershell
    Set-Location app
    flutter build web --release --dart-define=API_BASE_URL=https://<your-api-host>
    ```
 
-   Use the static site's HTTPS URL in `CORS_ORIGINS` and
-   `APP_RETURN_URL`. `API_BASE_URL` is compiled into the public client, so it
-   must never contain a credential. Rebuild the client after changing it.
-5. Verify `/api/health`, create a private session, and complete a payment only
-   with a Sandbox buyer account. The user returns to AlvaPay and selects
-   **Verify payment**; payment is not inferred from the redirect.
+   `API_BASE_URL` is compiled into the public client, so it must never contain
+   a credential. Rebuild the client after changing it.
+4. For Android, build and install an APK with that same cloud API URL:
+
+   ```powershell
+   Set-Location app
+   flutter build apk --release --dart-define=API_BASE_URL=https://<your-api-host>
+   ```
+
+   Install `app/build/app/outputs/flutter-apk/app-release.apk` on the phone.
+   Unlike the local USB setup, this build does not depend on the development
+   computer being on or connected.
+5. Verify `/api/health`, then sign in to the cloud service and test the
+   workflow with a Sandbox buyer account. The user returns to AlvaPay and
+   selects **Verify payment**; payment is not inferred from the redirect.
 
 Render persistent disks require a paid web-service plan. Without a persistent
 disk, the SQLite file is lost on restart or redeploy; do not host this MVP on
-an ephemeral filesystem if invoice persistence is expected. The instructions
-above describe deployment configuration, not a deployed or live-provider-
-tested service. Confirm persistent-disk behavior and provider configuration
-on the chosen host before sharing a public demo.
+an ephemeral filesystem if invoice persistence is expected. The cloud database
+starts empty: local SQLite records are not automatically copied to it. The
+Blueprint prepares the service but does not deploy it until the repository is
+connected to a Render account. These instructions do not mean the service has
+already been deployed or provider-tested.
 
 ## Demo and submission
 
