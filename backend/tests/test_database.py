@@ -235,7 +235,18 @@ def test_turso_configuration_requires_both_credentials(
     monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ALVAPAY_REQUIRE_TURSO", raising=False)
 
-    with pytest.raises(RuntimeError, match="Both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN"):
+    with pytest.raises(RuntimeError, match="Missing: TURSO_AUTH_TOKEN"):
+        Database()
+
+
+def test_turso_configuration_reports_missing_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+    monkeypatch.setenv("TURSO_AUTH_TOKEN", "test-token")
+    monkeypatch.delenv("ALVAPAY_REQUIRE_TURSO", raising=False)
+
+    with pytest.raises(RuntimeError, match="Missing: TURSO_DATABASE_URL"):
         Database()
 
 

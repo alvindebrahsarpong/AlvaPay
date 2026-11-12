@@ -73,8 +73,13 @@ class Database:
             and os.getenv("ALVAPAY_REQUIRE_TURSO", "").strip().lower() == "true"
         )
         if path is None and bool(database_url) != bool(auth_token):
+            missing = []
+            if not database_url:
+                missing.append("TURSO_DATABASE_URL")
+            if not auth_token:
+                missing.append("TURSO_AUTH_TOKEN")
             raise RuntimeError(
-                "Both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required for cloud storage."
+                f"Cloud storage credentials are incomplete. Missing: {', '.join(missing)}."
             )
         self._uses_turso = path is None and bool(database_url and auth_token)
         if require_turso and not self._uses_turso:
