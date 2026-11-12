@@ -173,6 +173,9 @@ Flutter build defines or paste them into source files.
 | Variable | Purpose | Default / requirement |
 | --- | --- | --- |
 | `DATABASE_PATH` | SQLite database location | `./data/alvapay.sqlite3` |
+| `TURSO_DATABASE_URL` | Remote SQLite-compatible database URL | Optional locally; required for cloud storage |
+| `TURSO_AUTH_TOKEN` | Server-side token for the remote database | Required with `TURSO_DATABASE_URL` |
+| `ALVAPAY_REQUIRE_TURSO` | Reject local-file fallback when cloud storage is required | `false` locally; `true` in the cloud |
 | `CORS_ORIGINS` | Comma-separated exact browser origins | `http://localhost:8080` |
 | `PAYPAL_ENV` | Payment environment | `sandbox` only |
 | `PAYPAL_CLIENT_ID` | PayPal Sandbox REST app client ID | Required for checkout |
@@ -188,26 +191,37 @@ Never use real customer data or production PayPal credentials for this demo.
 
 ## Deployment
 
-The API can be deployed to a Python ASGI host and the Flutter Web build to any
-HTTPS static-file host. Keep the SQLite file on a persistent disk and run a
-single backend instance; this MVP does not configure PostgreSQL or shared
-database access.
+The free deployment configuration uses a Render Free Python service for the
+API and a Turso Free database for persistent records. The API connects to
+Turso over HTTP using the documented SQLite-compatible Python driver; secrets
+stay in Render's environment settings. See Render's [FastAPI
+guide](https://render.com/docs/deploy-fastapi) and [Free instance
+limitations](https://render.com/docs/free), and Turso's [Python
+quickstart](https://docs.turso.tech/sdk/python/quickstart) and [pricing
+page](https://turso.tech/pricing).
 
-For a Render Python web service (see Render's
-[FastAPI guide](https://render.com/docs/deploy-fastapi),
-[web-service guide](https://render.com/docs/web-services), and
-[persistent-disk guide](https://render.com/docs/disks)):
+1. Create a Turso account and a database using Turso's official
+   [quickstart](https://docs.turso.tech/quickstart). The current Turso Free
+   plan lists 100 databases, 5 GB storage, and included read/write quotas at
+   $0/month. Create a database-scoped auth token and keep it private.
+2. In Render, create a Blueprint from this repository's root
+   [`render.yaml`](render.yaml), then set these service environment variables
+   in the Render dashboard:
 
-1. Push this repository to GitHub or another Git provider and connect it to
-   Render. Render detects the root [`render.yaml`](render.yaml) Blueprint.
-   Review and deploy the `alvapay-api` service. The Blueprint installs the
-   backend, starts Uvicorn on Render's assigned port, and attaches a 1 GB
-   persistent disk at `/var/data` for SQLite.
-2. In the Render service's Environment settings, set `CORS_ORIGINS` to the
-   exact HTTPS origin of the deployed Flutter site (no path or trailing slash)
-   and `APP_RETURN_URL` to that site's URL. Add the PayPal Sandbox and
-   Anthropic credentials there only if those integrations are to be used.
-   Never add credentials to the Blueprint, Flutter build, or repository.
+   - `TURSO_DATABASE_URL`: the database URL from Turso.
+   - `TURSO_AUTH_TOKEN`: the database-scoped token from Turso.
+   - `ALVAPAY_REQUIRE_TURSO=true`: the Blueprint sets this so startup fails
+     instead of silently writing to Render's temporary filesystem.
+   - `CORS_ORIGINS`: the exact HTTPS origin of the deployed Flutter Web site
+     (if Web is deployed).
+   - `APP_RETURN_URL`: the deployed AlvaPay site URL for PayPal Sandbox
+     approval returns.
+   - PayPal Sandbox and Anthropic credentials only if those integrations are
+     to be used.
+
+   Never add database or provider credentials to GitHub, Flutter build
+   defines, or committed files. The cloud database starts empty; local SQLite
+   records are not automatically copied.
 3. Check `https://<your-api-host>/api/health`. For a Flutter Web build, compile
    the public API URL into the client and publish `app/build/web` using a
    static host:
@@ -233,13 +247,15 @@ For a Render Python web service (see Render's
    workflow with a Sandbox buyer account. The user returns to AlvaPay and
    selects **Verify payment**; payment is not inferred from the redirect.
 
-Render persistent disks require a paid web-service plan. Without a persistent
-disk, the SQLite file is lost on restart or redeploy; do not host this MVP on
-an ephemeral filesystem if invoice persistence is expected. The cloud database
-starts empty: local SQLite records are not automatically copied to it. The
-Blueprint prepares the service but does not deploy it until the repository is
-connected to a Render account. These instructions do not mean the service has
-already been deployed or provider-tested.
+Render Free web services sleep after 15 minutes idle and may take about one
+minute to wake. They have an ephemeral filesystem, so this deployment uses
+Turso for persistence and explicitly refuses to fall back to a local SQLite
+file. Render Free services also have monthly resource limits and are intended
+for hobby/testing use, not production. Turso documents free-tier usage quotas;
+monitor usage and check current provider terms. Cloud features requiring
+PayPal or Anthropic still need those provider credentials configured
+separately. These instructions describe a deployment path, not a claim that a
+cloud service or live payment integration is already deployed.
 
 ## Demo and submission
 

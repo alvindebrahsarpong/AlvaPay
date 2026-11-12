@@ -2,6 +2,7 @@ import hashlib
 import sqlite3
 
 import pytest
+import turso_serverless
 
 from app.database import Database, IdempotencyConflictError
 from app.schemas import InvoiceCreateRequest
@@ -181,6 +182,61 @@ def test_invoice_reads_are_scoped_to_the_session_owner() -> None:
         assert database.list_invoices(owner_id=second_owner) == []
     finally:
         database.close()
+
+
+def test_turso_database_uses_remote_driver_and_persists_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote_connection = sqlite3.connect(":memory:", isolation_level=None)
+    remote_connection.row_factory = turso_serverless.Row
+    requested_connection: dict[str, str] = {}
+
+    def connect(url: str, *, auth_token: str) -> sqlite3.Connection:
+        requested_connection["url"] = url
+        requested_connection["auth_token"] = auth_token
+        return remote_connection
+
+    monkeypatch.setattr(turso_serverless, "connect", connect)
+    monkeypatch.setenv("TURSO_DATABASE_URL", "libsql://alvapay-example.turso.io")
+    monkeypatch.setenv("TURSO_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("ALVAPAY_REQUIRE_TURSO", "true")
+
+    database = Database()
+    try:
+        owner_id = database.create_account("cloud@example.test", "correct-horse-battery")
+        token = database.create_session(owner_id)
+
+        assert requested_connection == {
+            "url": "libsql://alvapay-example.turso.io",
+            "auth_token": "test-token",
+        }
+        assert database.owner_for_token(token) == owner_id
+        assert database.list_invoices(owner_id=owner_id) == []
+        database.ping()
+    finally:
+        database.close()
+
+
+def test_cloud_storage_can_be_required_without_falling_back_to_local_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+    monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALVAPAY_REQUIRE_TURSO", "true")
+
+    with pytest.raises(RuntimeError, match="Cloud storage is required"):
+        Database()
+
+
+def test_turso_configuration_requires_both_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TURSO_DATABASE_URL", "libsql://alvapay-example.turso.io")
+    monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ALVAPAY_REQUIRE_TURSO", raising=False)
+
+    with pytest.raises(RuntimeError, match="Both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN"):
+        Database()
 
 
 def test_checkout_state_is_idempotent_and_paid_requires_capture_transition() -> None:

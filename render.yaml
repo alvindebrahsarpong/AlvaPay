@@ -2,17 +2,13 @@ services:
   - type: web
     name: alvapay-api
     runtime: python
-    plan: starter
+    plan: free
     rootDir: backend
     buildCommand: pip install .
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
-    disk:
-      name: alvapay-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
-      - key: DATABASE_PATH
-        value: /var/data/alvapay.sqlite3
+      - key: ALVAPAY_REQUIRE_TURSO
+        value: "true"
       - key: PAYPAL_ENV
         value: sandbox

@@ -425,7 +425,7 @@ class AlvaPayApi implements AlvaPayBackend {
 
     final streamed = await _client
         .send(request)
-        .timeout(const Duration(seconds: 20));
+        .timeout(const Duration(seconds: 90));
     final response = await http.Response.fromStream(streamed);
     if (response.statusCode == 401 &&
         authenticated &&

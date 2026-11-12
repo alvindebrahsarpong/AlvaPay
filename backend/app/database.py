@@ -9,7 +9,10 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
+from typing import Any
 from uuid import uuid4
+
+import turso_serverless
 
 from app.schemas import InvoiceCreateRequest
 
@@ -63,20 +66,47 @@ _DUMMY_PASSWORD_HASH = _hash_password("alvapay-nonexistent-account-password")
 
 class Database:
     def __init__(self, path: str | Path | None = None) -> None:
-        configured_path = str(path or os.getenv("DATABASE_PATH", "./data/alvapay.sqlite3"))
-        if configured_path != ":memory:":
-            Path(configured_path).parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(
-            configured_path,
-            timeout=10,
-            isolation_level=None,
-            check_same_thread=False,
+        database_url = os.getenv("TURSO_DATABASE_URL", "").strip()
+        auth_token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+        require_turso = (
+            path is None
+            and os.getenv("ALVAPAY_REQUIRE_TURSO", "").strip().lower() == "true"
         )
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA foreign_keys = ON")
-        self._connection.execute("PRAGMA journal_mode = WAL")
+        if path is None and bool(database_url) != bool(auth_token):
+            raise RuntimeError(
+                "Both TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are required for cloud storage."
+            )
+        self._uses_turso = path is None and bool(database_url and auth_token)
+        if require_turso and not self._uses_turso:
+            raise RuntimeError(
+                "Cloud storage is required. Configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN."
+            )
+
+        if self._uses_turso:
+            self._connection = turso_serverless.connect(
+                database_url,
+                auth_token=auth_token,
+            )
+            self._connection.row_factory = turso_serverless.Row
+        else:
+            configured_path = str(path or os.getenv("DATABASE_PATH", "./data/alvapay.sqlite3"))
+            if configured_path != ":memory:":
+                Path(configured_path).parent.mkdir(parents=True, exist_ok=True)
+            self._connection = sqlite3.connect(
+                configured_path,
+                timeout=10,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            self._connection.execute("PRAGMA journal_mode = WAL")
         self._lock = RLock()
         self._initialize()
+
+    def ping(self) -> None:
+        with self._lock:
+            self._connection.execute("SELECT 1").fetchone()
 
     def close(self) -> None:
         with self._lock:
@@ -397,7 +427,7 @@ class Database:
         return _public_invoice(row)
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
+    def _transaction(self) -> Iterator[Any]:
         with self._lock:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
@@ -458,6 +488,8 @@ class Database:
                 );
                 """
             )
+            if self._uses_turso:
+                return
             session_columns = self._connection.execute(
                 "PRAGMA table_info(sessions)"
             ).fetchall()
@@ -489,7 +521,7 @@ class Database:
 
     @staticmethod
     def _move_guest_workspace(
-        connection: sqlite3.Connection,
+        connection: Any,
         guest_owner_id: str,
         account_owner_id: str,
     ) -> None:
@@ -521,7 +553,7 @@ class Database:
         )
 
 
-def _public_invoice(row: sqlite3.Row) -> dict[str, object]:
+def _public_invoice(row: Any) -> dict[str, object]:
     return {
         "id": row["id"],
         "customer_name": row["customer_name"],

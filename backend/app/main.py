@@ -54,6 +54,8 @@ def get_paypal_service() -> PayPalService:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     try:
+        if os.getenv("ALVAPAY_REQUIRE_TURSO", "").strip().lower() == "true":
+            get_database().ping()
         yield
     finally:
         if get_paypal_service.cache_info().currsize:
